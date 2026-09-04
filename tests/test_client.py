@@ -17,8 +17,8 @@ Author: superhot-wellbore GEOPHIRES client
 import numpy as np
 import pytest
 
-from superhot_wellbore.geophires_client.client import SuperhotWellboreClient
-from superhot_wellbore.geophires_client.config import SuperhotRequest
+from superhot_wellbore.client.client import SuperhotWellboreClient
+from superhot_wellbore.client.config import SuperhotRequest
 
 
 # ====================================================================

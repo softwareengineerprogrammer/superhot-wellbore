@@ -21,9 +21,9 @@ reservoir
 power_cycle
     Binary and flash power cycle analysis with Baumann wet-stage
     efficiency.
-geophires_client
-    Client that lets the coupled model act as a reservoir model in
-    GEOPHIRES.
+client
+    Stable interface exposing the coupled model as a production
+    history, used by the GEOPHIRES Superhot Wellbore reservoir model.
 
 The submodules are not imported here: they pull in the IAPWS-95
 equation of state, which is expensive to load. Import what you need::

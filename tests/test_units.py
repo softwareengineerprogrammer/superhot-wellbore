@@ -5,7 +5,7 @@ Unit Conversions
 
 GEOPHIRES speaks kPa, km, kJ/kg and inches while the coupled model
 works in MPa, m, MJ/kg and metres. Every number that crosses that
-boundary goes through :mod:`superhot_wellbore.geophires_client.units`,
+boundary goes through :mod:`superhot_wellbore.client.units`,
 so a wrong factor there is silent: the deck still runs, it just
 describes a different well. These tests pin the factors down.
 
@@ -14,7 +14,7 @@ Author: superhot-wellbore GEOPHIRES client
 
 import pytest
 
-from superhot_wellbore.geophires_client import units
+from superhot_wellbore.client import units
 
 
 @pytest.mark.parametrize('label, function, arguments, expected, tolerance', [

@@ -52,7 +52,7 @@ Homepage = "https://github.com/softwareengineerprogrammer/superhot-wellbore"
 Article = "https://doi.org/10.1016/j.geothermics.2026.103784"
 
 [project.scripts]
-superhot-geophires = "superhot_wellbore.geophires_client.cli:main"
+superhot-geophires = "superhot_wellbore.client.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

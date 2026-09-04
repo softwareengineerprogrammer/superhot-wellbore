@@ -12,7 +12,7 @@ files GEOPHIRES reads, without either program importing the other.
     superhot-geophires steady --set operating.target_whp_MPa=12
 
 The same commands are available as
-'python -m superhot_wellbore.geophires_client ...'.
+'python -m superhot_wellbore.client ...'.
 
 The 'run' command writes three files into the output directory: the
 GEOPHIRES temperature profile, a GEOPHIRES input deck fragment and

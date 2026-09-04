@@ -18,7 +18,7 @@ import json
 import numpy as np
 import pytest
 
-from superhot_wellbore.geophires_client.config import (DeclineConfig,
+from superhot_wellbore.client.config import (DeclineConfig,
                                                        SuperhotRequest,
                                                        TimeConfig, WellConfig)
 

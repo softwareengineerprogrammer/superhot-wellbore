@@ -188,8 +188,9 @@ class ProductionProfile:
     """
     Production history over the plant lifetime.
 
-    This is the object handed to GEOPHIRES, either in process (see
-    adapter.py) or through the files written by export.py.
+    This is the object handed to GEOPHIRES, either in process (by the
+    GEOPHIRES Superhot Wellbore reservoir model) or through the files
+    written by export.py.
     """
 
     request: Any = None
@@ -520,8 +521,13 @@ def interpolate_timesteps(times_yr, solved_results,
     -------
     list of TimestepResult
         One entry per element of times_yr. Entries that were not
-        solved are linearly interpolated from the successful solves;
-        flags are taken from the nearest solved timestep.
+        solved, and solved entries that failed, are linearly
+        interpolated from the successful solves; flags are taken from
+        the nearest successful solve. A failed solve keeps solved=True
+        and a message saying that its values were interpolated, so
+        that the failure stays visible. When no solve succeeded,
+        nothing is interpolated and every unsolved entry reports
+        success=False.
     """
     times = np.asarray(times_yr, dtype=float)
     good_indices = sorted(i for i, ts in solved_results.items()
@@ -529,11 +535,14 @@ def interpolate_timesteps(times_yr, solved_results,
 
     profile = []
     for index, t in enumerate(times):
+        failed = None
         if index in solved_results:
-            profile.append(solved_results[index])
-            continue
+            if solved_results[index].success or not good_indices:
+                profile.append(solved_results[index])
+                continue
+            failed = solved_results[index]
 
-        result = TimestepResult(time_yr=float(t), solved=False)
+        result = TimestepResult(time_yr=float(t), solved=failed is not None)
         if not good_indices:
             result.message = 'no successful solve available'
             profile.append(result)
@@ -560,7 +569,13 @@ def interpolate_timesteps(times_yr, solved_results,
         result.choked = reference.choked
         result.converged = reference.converged
         result.success = True
-        result.message = 'interpolated between coupled-model solves'
+        if failed is not None:
+            result.message = ('coupled model failed at this state ('
+                              + (failed.message or 'no details')
+                              + '); values interpolated between '
+                              'neighbouring successful solves')
+        else:
+            result.message = 'interpolated between coupled-model solves'
         profile.append(result)
 
     return profile

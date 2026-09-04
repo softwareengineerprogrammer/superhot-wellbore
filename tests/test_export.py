@@ -16,7 +16,7 @@ Author: superhot-wellbore GEOPHIRES client
 import json
 import os
 
-from superhot_wellbore.geophires_client import export
+from superhot_wellbore.client import export
 
 
 def test_temperature_profile_file(synthetic_profile, tmp_path):

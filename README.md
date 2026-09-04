@@ -51,7 +51,7 @@ superhot-wellbore/
 │   ├── wellbore_physics.py
 │   ├── reservoir.py
 │   ├── power_cycle.py
-│   └── geophires_client/        # GEOPHIRES integration
+│   └── client/                  # production-history interface used by GEOPHIRES
 ├── examples/                    # figure scripts from the manuscript
 ├── tests/                       # pytest suite
 └── pyproject.toml
@@ -66,7 +66,7 @@ superhot-wellbore/
 | `superhot_wellbore.wellbore_physics` | Wellbore pressure and enthalpy gradient integration (Eqs. 4–5 in manuscript) |
 | `superhot_wellbore.reservoir` | Radial Darcy flow model, depth–pressure scaling, and reservoir–wellbore coupling via bisection |
 | `superhot_wellbore.power_cycle` | Binary and flash power cycle analysis with Baumann wet-stage efficiency |
-| `superhot_wellbore.geophires_client` | Client exposing the coupled model as a GEOPHIRES reservoir model |
+| `superhot_wellbore.client` | Stable interface exposing the coupled model as a production history; used by the GEOPHIRES Superhot Wellbore reservoir model |
 
 ### Figure scripts
 
@@ -102,18 +102,40 @@ Results are cached as `.pkl` files to avoid rerunning simulations. Delete the ca
 
 ### GEOPHIRES
 
-The `geophires_client` subpackage lets the coupled reservoir–wellbore model
-act as a reservoir model in [GEOPHIRES](https://github.com/NREL/GEOPHIRES-X),
-either in process or through exported files. The file-based path is driven by
-the `superhot-geophires` command installed with the package:
+[GEOPHIRES](https://github.com/NREL/GEOPHIRES-X) includes a *Superhot Wellbore*
+reservoir model (`Reservoir Model, 9`) that runs the coupled reservoir–wellbore
+model through the `superhot_wellbore.client` package and then applies its own
+surface plant and economics. Install this package alongside GEOPHIRES and select
+the model in the input file; see `example_superhot-wellbore.txt` in the GEOPHIRES
+examples and the `geophires_x.SuperhotWellboreReservoir` docstring for the
+parameter mapping.
+
+```bash
+pip install geophires-x
+pip install git+https://github.com/softwareengineerprogrammer/superhot-wellbore.git
+```
+
+The client can also be driven directly from Python:
+
+```python
+from superhot_wellbore.client import SuperhotRequest, SuperhotWellboreClient
+
+request = SuperhotRequest.from_dict({
+    'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 450.0},
+    'operating': {'target_whp_MPa': 10.0},
+})
+profile = SuperhotWellboreClient(request).solve_profile()
+print(profile.summary())
+```
+
+For GEOPHIRES versions without the built-in model, the `superhot-geophires`
+command writes a temperature profile and an input deck fragment that GEOPHIRES
+reads with its *User-Provided Temperature Profile* reservoir model:
 
 ```bash
 superhot-geophires template > case.json
 superhot-geophires run --request case.json --output-dir out
 ```
-
-See the `superhot_wellbore.geophires_client` package docstring for the
-in-process alternative.
 
 ## Tests
 

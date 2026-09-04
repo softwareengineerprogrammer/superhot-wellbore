@@ -1,35 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-GEOPHIRES Client for the superhot-wellbore Model
-=================================================
+superhot-wellbore Client
+=========================
 
-Client that lets the superhot-wellbore coupled reservoir-wellbore
-model act as a reservoir model in GEOPHIRES.
+Stable interface through which an external program obtains a
+production history from the superhot-wellbore coupled
+reservoir-wellbore model. GEOPHIRES uses it for its Superhot Wellbore
+reservoir model (Reservoir Model 9, geophires_x/SuperhotWellboreReservoir.py).
 
-The superhot-wellbore modules solve a steady-state, single self-flowing
-well: given a far-field reservoir state (pressure, temperature,
-transmissivity) and a well, they return the mass flow rate and the
-wellhead conditions. GEOPHIRES expects a reservoir model to report a
-production temperature history over the plant lifetime, and then adds
-its own wellbore, surface plant and economics. This package bridges
-the two.
-
-Two integration paths
----------------------
-In process (adapter.py)
-    SuperhotWellboreReservoir is a GEOPHIRES-X reservoir model. It
-    reads its parameters from an ordinary GEOPHIRES input file, solves
-    the coupled model over GEOPHIRES' own time vector, and supplies
-    the reservoir output temperature together with the production
-    well state (wellhead temperature, flow rate, wellhead pressure),
-    since the superhot model simulates the well itself. Electricity
-    generation and economics remain GEOPHIRES' job.
-
-File based (cli.py, export.py)
-    A command-line client writes a 'time, temperature' profile plus a
-    matching GEOPHIRES input deck fragment, which GEOPHIRES reads with
-    its built-in 'User-Provided Temperature Profile' reservoir model.
-    Nothing has to import anything, in either direction.
+The core modules solve a steady-state, single self-flowing well: given
+a far-field reservoir state (pressure, temperature, transmissivity)
+and a well, they return the mass flow rate and the wellhead
+conditions. A techno-economic simulator such as GEOPHIRES instead
+expects a production history over a plant lifetime. This package
+bridges the two.
 
 From steady state to a history
 ------------------------------
@@ -44,7 +28,7 @@ Quick start
 -----------
 In Python::
 
-    from superhot_wellbore.geophires_client import (
+    from superhot_wellbore.client import (
         SuperhotRequest, SuperhotWellboreClient)
 
     request = SuperhotRequest.from_dict({
@@ -56,7 +40,16 @@ In Python::
     profile = SuperhotWellboreClient(request).solve_profile()
     print(profile.summary())
 
-On the command line::
+Pass the caller's own time vector to solve_profile(time_yr=...) to get
+one result per element of it, which is how GEOPHIRES calls it.
+
+File-based path
+---------------
+For GEOPHIRES versions without the built-in Superhot Wellbore
+reservoir model, the command-line client (cli.py, export.py) writes a
+'time, temperature' profile plus a matching GEOPHIRES input deck
+fragment, which GEOPHIRES reads with its 'User-Provided Temperature
+Profile' reservoir model::
 
     superhot-geophires run --set reservoir.T_reservoir_C=475
 
@@ -66,7 +59,7 @@ The client speaks the superhot-wellbore convention (MPa, MJ/kg,
 degrees C, m, kg/s). Conversion to the GEOPHIRES convention (kPa, km,
 inch, C/km) happens only in units.py and results.py.
 
-Author: superhot-wellbore GEOPHIRES client
+Author: superhot-wellbore client
 """
 
 from .. import __version__
@@ -115,10 +108,3 @@ __all__ = [
     'write_profile_json',
     'write_request_json',
 ]
-
-# adapter.py is deliberately not imported here: it is the only module
-# that touches GEOPHIRES, and the file-based path must stay usable
-# without it. Import it explicitly when needed:
-#
-#     from superhot_wellbore.geophires_client.adapter import (
-#         SuperhotWellboreReservoir)

@@ -16,7 +16,7 @@ Author: superhot-wellbore GEOPHIRES client
 
 import pytest
 
-from superhot_wellbore.geophires_client.results import interpolate_timesteps
+from superhot_wellbore.client.results import interpolate_timesteps
 
 
 # ====================================================================
@@ -106,3 +106,41 @@ def test_unknown_profile_temperature_rejected(synthetic_profile):
     """Only the two defined reference points are accepted."""
     with pytest.raises(ValueError):
         synthetic_profile.temperature_profile_rows('bottomhole')
+
+
+def test_failed_solve_is_interpolated_and_flagged():
+    """A failed solve between good ones is filled in, but still visible."""
+    from superhot_wellbore.client.results import TimestepResult
+
+    times = [0.0, 1.0, 2.0]
+    good = dict(mass_flow_kgs=70.0, whp_MPa=10.0, T_wellhead_C=300.0,
+                h_wellhead_MJkg=2.7, T_feedzone_C=390.0,
+                h_feedzone_MJkg=2.8, P_bh_MPa=18.0, dP_reservoir_MPa=12.0,
+                power_MWe=30.0, converged=True, success=True, solved=True)
+    solved = {
+        0: TimestepResult(time_yr=0.0, **good),
+        1: TimestepResult(time_yr=1.0, solved=True, success=False,
+                          message='did not reach the surface'),
+        2: TimestepResult(time_yr=2.0, **dict(good, mass_flow_kgs=60.0)),
+    }
+    filled = interpolate_timesteps(times, solved)
+
+    failed = filled[1]
+    assert failed.success and failed.solved, 'failed solve becomes usable'
+    assert failed.mass_flow_kgs == pytest.approx(65.0, abs=1e-9), \
+        'failed solve interpolated between neighbours'
+    assert 'did not reach the surface' in failed.message, \
+        'original failure stays visible'
+    assert all(ts.success for ts in filled), 'every timestep is usable'
+
+
+def test_failed_solve_without_any_success_stays_failed():
+    """With nothing to interpolate from, a failure remains a failure."""
+    from superhot_wellbore.client.results import TimestepResult
+
+    solved = {0: TimestepResult(time_yr=0.0, solved=True, success=False,
+                                message='boom')}
+    filled = interpolate_timesteps([0.0, 1.0], solved)
+    assert not filled[0].success and filled[0].message == 'boom', \
+        'failure preserved'
+    assert not filled[1].success, 'unsolved step has nothing to use'

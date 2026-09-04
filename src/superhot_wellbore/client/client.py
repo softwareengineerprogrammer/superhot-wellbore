@@ -28,13 +28,14 @@ The client does three things the raw modules leave to the caller:
 
     3. Isolates the caller from solver failures. Runtime warnings
        from the near-critical equation of state are suppressed,
-       failed states are reported through flags and notes instead of
-       exceptions (unless SolverConfig.strict is set), and every
-       result carries a success flag.
+       failed states are reported through notes and interpolated from
+       the neighbouring successful solves instead of raising (unless
+       SolverConfig.strict is set), and every result carries a
+       success flag.
 
 Typical use::
 
-    from superhot_wellbore.geophires_client import (
+    from superhot_wellbore.client import (
         SuperhotRequest, SuperhotWellboreClient)
 
     request = SuperhotRequest.from_dict({

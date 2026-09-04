@@ -14,8 +14,8 @@ Author: superhot-wellbore GEOPHIRES client
 
 import pytest
 
-from superhot_wellbore.geophires_client.config import SuperhotRequest
-from superhot_wellbore.geophires_client.results import (ProductionProfile,
+from superhot_wellbore.client.config import SuperhotRequest
+from superhot_wellbore.client.results import (ProductionProfile,
                                                         TimestepResult,
                                                         interpolate_timesteps)
 
