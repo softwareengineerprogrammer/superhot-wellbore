@@ -68,6 +68,9 @@ ROCK_TEMPERATURE_MODES = ('linear', 'boiling', 'user')
 # Flow control modes recognised by OperatingConfig
 CONTROL_MODES = ('whp', 'flow')
 
+# Quantities that OperatingConfig can hold constant over a history
+HOLD_MODES = ('whp', 'flow')
+
 
 # ====================================================================
 # SECTION HELPERS
@@ -367,11 +370,22 @@ class OperatingConfig:
         Target wellhead pressure [MPa] for control = 'whp'.
     mass_flow_kgs : float or None
         Prescribed mass flow rate [kg/s] for control = 'flow'.
+    hold : str
+        Quantity held constant along a declining production history
+        when control = 'whp':
+        'whp'  - re-solve for target_whp_MPa at every reservoir
+                 state, so the flow rate responds to the decline
+        'flow' - solve for the flow rate at the initial state only,
+                 then hold that flow rate and let the wellhead
+                 pressure respond. This is how GEOPHIRES operates a
+                 well, which carries a single flow rate per well.
+        Ignored when control = 'flow', which already holds the flow.
     """
 
     control: str = 'whp'
     target_whp_MPa: float = 10.0
     mass_flow_kgs: Optional[float] = None
+    hold: str = 'whp'
 
     def validate(self):
         """Raise ValueError if the section is inconsistent."""
@@ -385,6 +399,10 @@ class OperatingConfig:
             if self.mass_flow_kgs is None or self.mass_flow_kgs <= 0:
                 raise ValueError("control 'flow' requires a positive "
                                  'mass_flow_kgs')
+        if self.hold not in HOLD_MODES:
+            raise ValueError(
+                f'Unknown hold mode {self.hold!r}. Valid modes: '
+                f'{", ".join(HOLD_MODES)}')
 
 
 @dataclass

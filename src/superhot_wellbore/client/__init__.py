@@ -65,7 +65,7 @@ Author: superhot-wellbore client
 from .. import __version__
 from .client import (SuperhotWellboreClient, solve_profile,
                      solve_steady_state)
-from .config import (CONTROL_MODES, DECLINE_MODES,
+from .config import (CONTROL_MODES, DECLINE_MODES, HOLD_MODES,
                      ROCK_TEMPERATURE_MODES, DeclineConfig,
                      OperatingConfig, ReservoirConfig,
                      RockTemperatureConfig, SolverConfig,
@@ -95,6 +95,7 @@ __all__ = [
     'DECLINE_MODES',
     'ROCK_TEMPERATURE_MODES',
     'CONTROL_MODES',
+    'HOLD_MODES',
     # Results
     'ProductionProfile',
     'TimestepResult',

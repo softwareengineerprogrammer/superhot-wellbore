@@ -81,3 +81,64 @@ def test_coupled_solve_is_physically_ordered():
     assert profile.n_failed == 0, 'every timestep is usable'
     assert np.isfinite(first.power_MWe), \
         'the power diagnostic is available, got ' + str(first.power_MWe)
+
+
+# ====================================================================
+# HELD FLOW RATE
+# ====================================================================
+
+def test_hold_flow_solves_once_for_pressure_then_prescribes_flow(monkeypatch):
+    """With hold='flow', the flow found at t = 0 is prescribed afterwards."""
+    from superhot_wellbore.client import client as client_module
+
+    calls = []
+
+    def fake_solve_flow_for_whp(**kwargs):
+        calls.append(('whp', kwargs['P_reservoir_MPa']))
+        return {'success': True, 'converged': True, 'mass_flow_kgs': 50.0,
+                'whp_MPa': kwargs['target_whp_MPa'], 'T_surface_C': 300.0,
+                'h_surface_MJkg': 2.7, 'T_feedzone_C': 390.0,
+                'h_feedzone_MJkg': 2.8, 'P_bh_MPa': 20.0,
+                'dP_reservoir_MPa': 10.0, 'choked': False}
+
+    def fake_coupled_model(**kwargs):
+        calls.append(('flow', kwargs['mass_flow_rate']))
+        return {'success': True, 'mass_flow_kgs': kwargs['mass_flow_rate'],
+                'whp_MPa': 8.0, 'T_surface_C': 290.0, 'h_surface_MJkg': 2.6,
+                'T_feedzone_C': 380.0, 'h_feedzone_MJkg': 2.7,
+                'P_bh_MPa': 18.0, 'dP_reservoir_MPa': 9.0, 'choked': False}
+
+    monkeypatch.setattr(client_module.core, 'solve_flow_for_whp',
+                        fake_solve_flow_for_whp)
+    monkeypatch.setattr(client_module.core, 'coupled_model',
+                        fake_coupled_model)
+    monkeypatch.setattr(client_module, 'power_cycle',
+                        type('PC', (), {'power_cycle_analysis':
+                                        staticmethod(lambda raw: None)}))
+
+    request = SuperhotRequest.from_dict({
+        'well': {'depth_m': 3500},
+        'operating': {'control': 'whp', 'target_whp_MPa': 10.0,
+                      'hold': 'flow'},
+        'decline': {'pressure_mode': 'linear_percent',
+                    'pressure_rate_per_year': 1.0},
+        'time': {'plant_lifetime_yr': 3, 'timesteps_per_year': 1},
+        'solver': {'max_solve_points': 3},
+    })
+    profile = SuperhotWellboreClient(request).solve_profile()
+
+    assert [kind for kind, _ in calls] == ['whp', 'flow', 'flow'], \
+        'one pressure solve, then prescribed-flow solves'
+    assert all(flow == 50.0 for kind, flow in calls if kind == 'flow'), \
+        'the initial flow rate is held'
+    assert profile.timesteps[-1].whp_MPa == pytest.approx(8.0), \
+        'wellhead pressure responds to the decline'
+    assert any('held constant' in note for note in profile.notes), \
+        'holding the flow is reported'
+
+
+def test_unknown_hold_mode_rejected():
+    """An unknown hold mode is caught by validate()."""
+    request = SuperhotRequest.from_dict({'operating': {'hold': 'temperature'}})
+    with pytest.raises(ValueError):
+        request.validate()

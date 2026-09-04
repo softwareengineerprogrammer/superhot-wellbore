@@ -199,7 +199,7 @@ class SuperhotWellboreClient:
     # ----------------------------------------------------------------
 
     def solve_state(self, P_reservoir_MPa, T_reservoir_C,
-                    previous_solution=None):
+                    previous_solution=None, mass_flow_kgs=None):
         """
         Solve the coupled model at one far-field reservoir state.
 
@@ -212,6 +212,11 @@ class SuperhotWellboreClient:
         previous_solution : dict or None
             Output of an earlier solve, used as a starting point by
             reservoir.solve_flow_for_whp().
+        mass_flow_kgs : float or None
+            Prescribe this flow rate instead of following the
+            request's operating control, and compute the resulting
+            wellhead pressure. Used to hold the flow rate constant
+            along a history (OperatingConfig.hold = 'flow').
 
         Returns
         -------
@@ -227,13 +232,16 @@ class SuperhotWellboreClient:
         well_params = self._well_params()
         rock_temperatures = self._rock_temperatures(T_reservoir_C)
 
+        if mass_flow_kgs is None and operating.control == 'flow':
+            mass_flow_kgs = operating.mass_flow_kgs
+
         raw = None
         with warnings.catch_warnings():
             # The near-critical equation of state warns freely; the
             # success flags in the returned dict are authoritative.
             warnings.simplefilter('ignore', RuntimeWarning)
             try:
-                if operating.control == 'whp':
+                if mass_flow_kgs is None:
                     raw = core.solve_flow_for_whp(
                         target_whp_MPa=operating.target_whp_MPa,
                         P_reservoir_MPa=P_reservoir_MPa,
@@ -246,7 +254,7 @@ class SuperhotWellboreClient:
                         verbose=solver.verbose)
                 else:
                     raw = core.coupled_model(
-                        mass_flow_rate=operating.mass_flow_kgs,
+                        mass_flow_rate=mass_flow_kgs,
                         P_reservoir_MPa=P_reservoir_MPa,
                         T_reservoir_C=T_reservoir_C,
                         rock_temperatures=rock_temperatures,
@@ -402,16 +410,32 @@ class SuperhotWellboreClient:
         notes = list(self.notes)
         solved = {}
         previous = None
+        operating = self.request.operating
+        hold_flow = (operating.control == 'whp'
+                     and operating.hold == 'flow')
+        held_flow_kgs = None
 
         for index in indices:
             result, raw = self.solve_state(
                 pressures[index], temperatures[index],
-                previous_solution=previous)
+                previous_solution=previous,
+                mass_flow_kgs=held_flow_kgs)
             result.time_yr = float(times[index])
             solved[index] = result
 
             if result.success:
                 previous = raw if solver.reuse_previous_solution else None
+                if hold_flow and held_flow_kgs is None:
+                    held_flow_kgs = result.mass_flow_kgs
+                    if len(indices) > 1:
+                        notes.append(
+                            f'Flow rate of {held_flow_kgs:.2f} kg/s '
+                            f'solved at t = {times[index]:.2f} yr for '
+                            f'a wellhead pressure of '
+                            f'{operating.target_whp_MPa:g} MPa is held '
+                            f'constant over the history; the wellhead '
+                            f'pressure responds to the reservoir '
+                            f'decline')
             else:
                 previous = None
                 message = (f'Coupled model failed at t = '
@@ -462,8 +486,12 @@ class SuperhotWellboreClient:
         Time indices at which the coupled model is actually solved.
 
         The first and last timesteps are always included so that the
-        interpolation never extrapolates.
+        interpolation never extrapolates. A steady reservoir (no
+        decline) is solved once, since every timestep has the same
+        state.
         """
+        if self.request.decline.is_steady():
+            return [0]
         limit = self.request.solver.max_solve_points
         if limit is None or limit <= 0 or limit >= n_timesteps:
             return list(range(n_timesteps))
