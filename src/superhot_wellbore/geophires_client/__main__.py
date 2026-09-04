@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Module entry point: python -m geophires_client
+Module entry point: python -m superhot_wellbore.geophires_client
 """
 
 import sys

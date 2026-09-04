@@ -18,7 +18,7 @@ an input file alone. Use install() right after building the model and
 before calculating it::
 
     from geophires_x.Model import Model
-    from geophires_client.adapter import install
+    from superhot_wellbore.geophires_client.adapter import install
 
     model = Model(input_file='my_superhot_case.txt')
     install(model)
@@ -86,7 +86,7 @@ def _require_geophires():
             'GEOPHIRES-X is not importable, so the in-process adapter '
             'cannot be used. Install it with "pip install '
             'geophires-x", or use the file-based integration instead '
-            '(python -m geophires_client run ...), which needs no '
+            '(superhot-geophires run ...), which needs no '
             'GEOPHIRES import.') from _IMPORT_ERROR
 
 

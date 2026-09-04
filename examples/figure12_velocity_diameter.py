@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 import CoolProp.CoolProp as CP
 from matplotlib.lines import Line2D
 
-from reservoir import (
+from superhot_wellbore.reservoir import (
     solve_flow_for_whp,
     rock_temperature_linear,
     depth_for_pressure,

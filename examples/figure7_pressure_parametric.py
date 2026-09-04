@@ -29,12 +29,12 @@ import os
 
 import CoolProp.CoolProp as CP
 
-from reservoir import (
+from superhot_wellbore.reservoir import (
     solve_flow_for_whp,
     rock_temperature_linear,
     depth_for_pressure,
 )
-from power_cycle import power_cycle_analysis
+from superhot_wellbore.power_cycle import power_cycle_analysis
 
 
 # ====================================================================

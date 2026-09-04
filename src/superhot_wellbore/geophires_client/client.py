@@ -34,7 +34,8 @@ The client does three things the raw modules leave to the caller:
 
 Typical use::
 
-    from geophires_client import SuperhotRequest, SuperhotWellboreClient
+    from superhot_wellbore.geophires_client import (
+        SuperhotRequest, SuperhotWellboreClient)
 
     request = SuperhotRequest.from_dict({
         'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 450.0,
@@ -53,8 +54,9 @@ import warnings
 
 import numpy as np
 
+from .. import power_cycle
+from .. import reservoir as core
 from . import results as results_module
-from ._core import power_cycle, reservoir as core
 from .config import SuperhotRequest
 from .results import (ProductionProfile, TimestepResult,
                       interpolate_timesteps)

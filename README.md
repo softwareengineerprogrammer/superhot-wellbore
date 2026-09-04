@@ -21,46 +21,114 @@ The framework is applied across the full range of superhot conditions observed g
 - [iapws](https://github.com/jjgomez/iapws) — IAPWS-97 backward equations for near-critical routing
 - NumPy
 - SciPy
-- Matplotlib
+- Matplotlib (figure scripts only)
 
-Install dependencies with:
+## Installation
 
 ```bash
-pip install CoolProp iapws numpy scipy matplotlib
+pip install .
+```
+
+For development, install in editable mode with the optional extras:
+
+```bash
+pip install -e ".[dev]"
+```
+
+The extras are:
+
+| Extra | Adds |
+|-------|------|
+| `figures` | Matplotlib, needed to run the scripts in `examples/` |
+| `test` | pytest, needed to run the test suite |
+| `dev` | Both of the above |
+
+## Project layout
+
+```
+superhot-wellbore/
+├── src/superhot_wellbore/       # the installable package
+│   ├── wellbore_physics.py
+│   ├── reservoir.py
+│   ├── power_cycle.py
+│   └── geophires_client/        # GEOPHIRES integration
+├── examples/                    # figure scripts from the manuscript
+├── tests/                       # pytest suite
+└── pyproject.toml
 ```
 
 ## Contents
 
 ### Core modules
 
-| File | Description |
-|------|-------------|
-| `wellbore_physics.py` | Wellbore pressure and enthalpy gradient integration (Eqs. 4–5 in manuscript) |
-| `reservoir.py` | Radial Darcy flow model, depth–pressure scaling, and reservoir–wellbore coupling via bisection |
-| `power_cycle.py` | Binary and flash power cycle analysis with Baumann wet-stage efficiency |
+| Module | Description |
+|--------|-------------|
+| `superhot_wellbore.wellbore_physics` | Wellbore pressure and enthalpy gradient integration (Eqs. 4–5 in manuscript) |
+| `superhot_wellbore.reservoir` | Radial Darcy flow model, depth–pressure scaling, and reservoir–wellbore coupling via bisection |
+| `superhot_wellbore.power_cycle` | Binary and flash power cycle analysis with Baumann wet-stage efficiency |
+| `superhot_wellbore.geophires_client` | Client exposing the coupled model as a GEOPHIRES reservoir model |
 
 ### Figure scripts
 
 | File | Figure | Description |
 |------|--------|-------------|
-| `figure4_sensitivity_U_roughness.py` | Fig. 4 | Sensitivity to casing roughness and heat-loss coefficient |
-| `figure5_calibrate_iddp1.py` | Fig. 5 | IDDP-1 deliverability curve calibration |
-| `figure6_iddp1_profiles.py` | Fig. 6 | Downhole pressure, temperature, and enthalpy profiles |
-| `figure7_pressure_parametric.py` | Fig. 7 | Pressure parametric analysis (450, 475, 500 °C) |
-| `figure8_temperature_parametric.py` | Fig. 8 | Temperature parametric analysis (20, 30, 40 MPa) |
-| `figure9_transmissivity_parametric_analysis.py` | Fig. 9 | Transmissivity parametric analysis |
-| `figure11_whpsweep.py` | Fig. 11 | Wellhead pressure sweep for selected scenarios |
-| `figure12_velocity_diameter.py` | Fig. 12 | Wellhead velocity and mass flow for two casing sizes |
+| `examples/figure4_sensitivity_U_roughness.py` | Fig. 4 | Sensitivity to casing roughness and heat-loss coefficient |
+| `examples/figure5_calibrate_iddp1.py` | Fig. 5 | IDDP-1 deliverability curve calibration |
+| `examples/figure6_iddp1_profiles.py` | Fig. 6 | Downhole pressure, temperature, and enthalpy profiles |
+| `examples/figure7_pressure_parametric.py` | Fig. 7 | Pressure parametric analysis (450, 475, 500 °C) |
+| `examples/figure8_temperature_parametric.py` | Fig. 8 | Temperature parametric analysis (20, 30, 40 MPa) |
+| `examples/figure9_transmissivity_parametric_analysis.py` | Fig. 9 | Transmissivity parametric analysis |
+| `examples/figure11_whpsweep.py` | Fig. 11 | Wellhead pressure sweep for selected scenarios |
+| `examples/figure12_velocity_diameter.py` | Fig. 12 | Wellhead velocity and mass flow for two casing sizes |
 
 ## Usage
+
+### As a library
+
+```python
+from superhot_wellbore.reservoir import solve_flow_for_whp
+from superhot_wellbore.power_cycle import power_cycle_analysis
+```
+
+### Figure scripts
 
 Each figure script can be run independently. For example:
 
 ```bash
-python figure7_pressure_parametric.py
+python examples/figure7_pressure_parametric.py
 ```
 
 Results are cached as `.pkl` files to avoid rerunning simulations. Delete the cache file to force a fresh run.
+
+### GEOPHIRES
+
+The `geophires_client` subpackage lets the coupled reservoir–wellbore model
+act as a reservoir model in [GEOPHIRES](https://github.com/NREL/GEOPHIRES-X),
+either in process or through exported files. The file-based path is driven by
+the `superhot-geophires` command installed with the package:
+
+```bash
+superhot-geophires template > case.json
+superhot-geophires run --request case.json --output-dir out
+```
+
+See the `superhot_wellbore.geophires_client` package docstring for the
+in-process alternative.
+
+## Tests
+
+```bash
+pip install -e ".[test]"
+pytest
+```
+
+The tests that solve the coupled reservoir–wellbore model are marked `slow`
+and take noticeably longer:
+
+```bash
+pytest -m "not slow"   # fast checks only
+pytest -m slow         # coupled-model solves
+```
 
 ## Citation
 

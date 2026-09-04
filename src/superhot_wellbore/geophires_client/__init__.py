@@ -44,7 +44,8 @@ Quick start
 -----------
 In Python::
 
-    from geophires_client import SuperhotRequest, SuperhotWellboreClient
+    from superhot_wellbore.geophires_client import (
+        SuperhotRequest, SuperhotWellboreClient)
 
     request = SuperhotRequest.from_dict({
         'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 450.0},
@@ -57,7 +58,7 @@ In Python::
 
 On the command line::
 
-    python -m geophires_client run --set reservoir.T_reservoir_C=475
+    superhot-geophires run --set reservoir.T_reservoir_C=475
 
 Units
 -----
@@ -68,6 +69,7 @@ inch, C/km) happens only in units.py and results.py.
 Author: superhot-wellbore GEOPHIRES client
 """
 
+from .. import __version__
 from .client import (SuperhotWellboreClient, solve_profile,
                      solve_steady_state)
 from .config import (CONTROL_MODES, DECLINE_MODES,
@@ -82,9 +84,8 @@ from .results import (GEOPHIRES_RESERVOIR_MODEL_UPP,
                       PROFILE_TEMPERATURES, ProductionProfile,
                       TimestepResult)
 
-__version__ = '1.0.0'
-
 __all__ = [
+    '__version__',
     # Client
     'SuperhotWellboreClient',
     'solve_profile',
@@ -119,4 +120,5 @@ __all__ = [
 # that touches GEOPHIRES, and the file-based path must stay usable
 # without it. Import it explicitly when needed:
 #
-#     from geophires_client.adapter import SuperhotWellboreReservoir
+#     from superhot_wellbore.geophires_client.adapter import (
+#         SuperhotWellboreReservoir)

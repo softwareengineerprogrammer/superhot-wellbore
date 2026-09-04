@@ -9,7 +9,7 @@ profiles for two flow regimes at IDDP-1:
     - High flow: WHP = 4 MPa (flow determined by solver)
 
 Usage:
-    python figure6_iddp1_profiles.py
+    python examples/figure6_iddp1_profiles.py
 """
 
 import warnings
@@ -18,7 +18,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-from reservoir import (
+from superhot_wellbore.reservoir import (
     coupled_model,
     solve_flow_for_whp,
     rock_temperature_boiling,

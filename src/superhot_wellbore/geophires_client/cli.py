@@ -6,11 +6,13 @@ Command-Line Client
 File-based integration path: solve a superhot scenario and write the
 files GEOPHIRES reads, without either program importing the other.
 
-    python -m geophires_client template > case.json
-    python -m geophires_client run --request case.json --output-dir out
-    python -m geophires_client run --set reservoir.T_reservoir_C=500
-    python -m geophires_client steady --set operating.target_whp_MPa=12
-    python -m geophires_client selftest
+    superhot-geophires template > case.json
+    superhot-geophires run --request case.json --output-dir out
+    superhot-geophires run --set reservoir.T_reservoir_C=500
+    superhot-geophires steady --set operating.target_whp_MPa=12
+
+The same commands are available as
+'python -m superhot_wellbore.geophires_client ...'.
 
 The 'run' command writes three files into the output directory: the
 GEOPHIRES temperature profile, a GEOPHIRES input deck fragment and
@@ -187,12 +189,6 @@ def command_steady(arguments):
     return 0 if result.success else 1
 
 
-def command_selftest(arguments):
-    """Run the internal consistency checks."""
-    from .selftest import run_selftest
-    return run_selftest(quick=not arguments.full)
-
-
 def _print_summary(profile):
     """Print the headline numbers of a profile."""
     print('')
@@ -218,7 +214,7 @@ def _print_summary(profile):
 def build_parser():
     """Build the argument parser of the command-line client."""
     parser = argparse.ArgumentParser(
-        prog='python -m geophires_client',
+        prog='superhot-geophires',
         description='Solve a superhot single-well scenario with the '
                     'superhot-wellbore model and export it for '
                     'GEOPHIRES.')
@@ -265,13 +261,6 @@ def build_parser():
         'steady', help='Solve the initial steady state only.')
     add_request_arguments(steady)
     steady.set_defaults(handler=command_steady)
-
-    selftest = subparsers.add_parser(
-        'selftest', help='Check the client against the core modules.')
-    selftest.add_argument(
-        '--full', action='store_true',
-        help='Also run the slower coupled-model checks.')
-    selftest.set_defaults(handler=command_selftest)
 
     return parser
 

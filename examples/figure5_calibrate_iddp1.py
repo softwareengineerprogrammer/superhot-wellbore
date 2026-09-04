@@ -8,7 +8,7 @@ data (Ingason et al., 2014) by optimizing reservoir pressure and
 transmissivity. Produces Figure 5 from Scott (2026).
 
 Usage:
-    python calibrate_iddp1.py
+    python examples/figure5_calibrate_iddp1.py
 """
 
 import warnings
@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 from scipy.optimize import minimize
 
-from reservoir import (
+from superhot_wellbore.reservoir import (
     evaluate_at_flow_rates,
     rock_temperature_boiling,
     DEFAULT_WELL_PARAMS,
