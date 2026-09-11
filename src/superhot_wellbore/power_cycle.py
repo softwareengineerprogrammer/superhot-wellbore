@@ -89,6 +89,15 @@ state (using enthalpy-pressure, not temperature-pressure):
     h_surface >= h_sat,vapor(WHP) + margin  -->  binary cycle
     h_surface <  h_sat,vapor(WHP) + margin  -->  flash cycle
 
+Above the critical pressure (22.064 MPa) the saturation curve ends
+and h_sat,vapor(WHP) does not exist, but the wellhead fluid is
+single-phase and can still be routed. The boundary is continued as
+the critical-point enthalpy h_crit = 2.084 MJ/kg (the endpoint of
+the saturated-vapor curve), so selection is continuous across
+P_crit: a dense, liquid-like supercritical fluid flashes, a
+vapor-like one goes to the binary cycle. Deep superhot wells can
+reach the wellhead in this state (e.g. 375 C at 26 MPa).
+
 Binary cycle (superheated or single-phase vapor inlet):
     Geothermal steam transfers heat to a secondary working fluid
     (water at P_wf = 1.0 MPa) via a counter-flow heat exchanger.
@@ -339,6 +348,13 @@ DEFAULT_POWER_PARAMS = {
 # when the flash cycle passes h_g as the turbine inlet enthalpy.
 _TURBINE_SUPERHEAT_TOL_Jkg = 1.0e3  # 1 kJ/kg
 
+# IAPWS-95 critical point of water (Wagner and Pruss, 2002).
+# The saturation curve ends here; CoolProp PQ lookups fail at or
+# above _P_CRIT_MPa. _H_CRIT_Jkg is the enthalpy at (T_crit,
+# rho_crit), i.e. the endpoint of the saturated-vapor curve.
+_P_CRIT_MPa = 22.064
+_H_CRIT_Jkg = 2.0843e6
+
 
 # ====================================================================
 # PUBLIC API
@@ -423,8 +439,9 @@ def power_cycle_analysis(coupled_result, params=None):
             return fail
 
         # Saturated vapor enthalpy at WHP for cycle selection
-        h_sat_vap = CP.PropsSI('H', 'P', P_whp_MPa * 1e6, 'Q', 1,
-                               'Water')
+        # (continued through the critical point for supercritical
+        # wellhead pressure; see _cycle_selection_enthalpy).
+        h_sat_vap = _cycle_selection_enthalpy(P_whp_MPa)
 
         # Cycle selection based on H-P state
         is_superheated = h_in_Jkg >= (h_sat_vap + pp['superheat_margin_Jkg'])
@@ -470,6 +487,49 @@ def power_cycle_analysis(coupled_result, params=None):
         warnings.warn(f"power_cycle_analysis failed: {e}",
                       RuntimeWarning, stacklevel=2)
         return fail
+
+
+# ====================================================================
+# CYCLE SELECTION
+# ====================================================================
+
+def _cycle_selection_enthalpy(P_MPa):
+    """
+    Vapor-like / liquid-like boundary enthalpy [J/kg] at pressure P.
+
+    Below the critical pressure this is the saturated vapor enthalpy
+    h_g(P), the threshold used by the cycle selection rule (see the
+    module docstring). Above it there is no saturation curve: a PQ
+    lookup raises, but the wellhead fluid is single-phase and must
+    still be routed to a cycle. The boundary is continued as the
+    critical-point enthalpy h_crit, the endpoint of the saturated-
+    vapor curve, so selection is continuous across P_crit.
+
+    Together with the default superheat margin (50 kJ/kg) this
+    tracks the pseudo-critical (Widom) line to within a few kelvin
+    over 22-30 MPa, so a dense, liquid-like supercritical fluid
+    (e.g. 375 C at 26 MPa, h = 1.83 MJ/kg) flashes, exactly as the
+    same enthalpy would at 21.9 MPa, while a vapor-like fluid
+    (e.g. 500 C at 25 MPa, h = 3.17 MJ/kg) goes to the binary cycle.
+
+    Parameters
+    ----------
+    P_MPa : float
+        Wellhead pressure [MPa].
+
+    Returns
+    -------
+    float
+        Boundary enthalpy [J/kg].
+    """
+    if P_MPa >= _P_CRIT_MPa:
+        return _H_CRIT_Jkg
+    try:
+        return CP.PropsSI('H', 'P', P_MPa * 1e6, 'Q', 1, 'Water')
+    except ValueError:
+        # Numerical band just below P_crit where the PQ flash does
+        # not converge; h_g is within 0.3% of h_crit there.
+        return _H_CRIT_Jkg
 
 
 # ====================================================================

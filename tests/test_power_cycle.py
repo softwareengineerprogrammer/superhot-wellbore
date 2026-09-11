@@ -100,6 +100,79 @@ class TestCycleSelection:
         assert r['cycle'] == 'flash', f"got {r['cycle']}"
 
 
+class TestSupercriticalWellhead:
+    """
+    Above the critical pressure (22.064 MPa) there is no saturated
+    vapor state to compare against, but the wellhead fluid is
+    single-phase and the analysis must still run. A deep superhot
+    well (450 C reservoir at 10-12 km) reaches the wellhead as a
+    dense, liquid-like supercritical fluid at 24-26 MPa and ~375 C:
+    it flashes like the same enthalpy just below P_crit would. A
+    vapor-like supercritical fluid routes to the binary cycle.
+    """
+
+    P_CRIT = 22.064
+
+    @staticmethod
+    def _analyse(cm):
+        """Run the analysis, failing the test on any failure warning."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            r = power_cycle_analysis(cm)
+        failures = [x for x in caught if 'failed' in str(x.message)]
+        assert not failures, [str(x.message) for x in failures]
+        return r
+
+    def test_liquid_like_supercritical_wellhead_flashes(self):
+        """375 C at 26 MPa: h ~ 1.83 MJ/kg, rho ~ 520 kg/m3."""
+        r = self._analyse(_mock_cm(60.0, 26.0, _h_MJkg(375.0, 26.0)))
+        assert r['success'], r
+        assert r['cycle'] == 'flash', f"got {r['cycle']}"
+        assert np.isfinite(r['power_MWe']) and r['power_MWe'] > 0
+        assert 0 < r['eta_utilization'] < 1
+        assert np.isfinite(r['exergy_rate_MW']) and r['exergy_rate_MW'] > 0
+
+    def test_vapor_like_supercritical_wellhead_selects_binary(self):
+        """500 C at 25 MPa: h ~ 3.17 MJ/kg, rho ~ 90 kg/m3."""
+        r = self._analyse(_mock_cm(30.0, 25.0, _h_MJkg(500.0, 25.0)))
+        assert r['success'], r
+        assert r['cycle'] == 'binary', f"got {r['cycle']}"
+        assert np.isfinite(r['power_MWe']) and r['power_MWe'] > 0
+
+    @pytest.mark.parametrize('h_MJkg, expected_cycle', [
+        (1.9, 'flash'),
+        (3.0, 'binary'),
+    ])
+    def test_selection_is_continuous_across_critical_pressure(
+            self, h_MJkg, expected_cycle):
+        """
+        The same wellhead enthalpy 1% below and 1% above P_crit must
+        select the same cycle and give practically the same power.
+        """
+        below = self._analyse(_mock_cm(60.0, 0.99 * self.P_CRIT, h_MJkg))
+        above = self._analyse(_mock_cm(60.0, 1.01 * self.P_CRIT, h_MJkg))
+        assert below['success'] and above['success']
+        assert below['cycle'] == expected_cycle, below['cycle']
+        assert above['cycle'] == expected_cycle, above['cycle']
+        assert above['power_MWe'] == pytest.approx(below['power_MWe'],
+                                                   rel=0.02)
+
+    def test_selection_enthalpy_matches_saturation_below_critical(self):
+        """Below P_crit the helper is exactly h_g(P): no behaviour change."""
+        from superhot_wellbore.power_cycle import _cycle_selection_enthalpy
+        for P in (1.0, 10.0, 21.0, 22.0):
+            assert _cycle_selection_enthalpy(P) == pytest.approx(
+                _h_saturated_MJkg(P, 1) * 1e6)
+
+    def test_selection_enthalpy_continuous_at_critical_pressure(self):
+        """The continuation joins h_g(P) at the critical point."""
+        from superhot_wellbore.power_cycle import _cycle_selection_enthalpy
+        just_below = _cycle_selection_enthalpy(self.P_CRIT - 1e-4)
+        at = _cycle_selection_enthalpy(self.P_CRIT)
+        assert at == pytest.approx(just_below, rel=0.005)
+        assert _cycle_selection_enthalpy(30.0) == at
+
+
 # ====================================================================
 # 2. FIRST LAW CONSISTENCY (BINARY CYCLE)
 # ====================================================================
