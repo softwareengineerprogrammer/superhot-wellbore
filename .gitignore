@@ -21,3 +21,5 @@ htmlcov/
 
 # Simulation caches written by the figure scripts
 *.pkl
+
+.DS_Store
