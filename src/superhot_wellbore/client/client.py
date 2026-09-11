@@ -270,7 +270,8 @@ class SuperhotWellboreClient:
 
         result = self._translate(raw, P_reservoir_MPa, T_reservoir_C)
         if result.success:
-            result.power_MWe, result.cycle = self._power_diagnostic(raw)
+            (result.power_MWe, result.cycle, result.eta_utilization,
+             result.exergy_rate_MW) = self._power_cycle(raw)
         return result, raw
 
     def _translate(self, raw, P_reservoir_MPa, T_reservoir_C):
@@ -326,26 +327,35 @@ class SuperhotWellboreClient:
                               'wellhead pressure')
         return result
 
-    def _power_diagnostic(self, raw):
+    def _power_cycle(self, raw):
         """
-        Gross power for reference only, via power_cycle.py.
+        Surface power cycle of a solved state, via power_cycle.py with
+        the request's PowerCycleConfig.
 
-        GEOPHIRES computes electricity generation with its own surface
-        plant model; this value exists so that the two can be
-        compared.
+        Returns
+        -------
+        (power_MWe, cycle, eta_utilization, exergy_rate_MW)
+            Gross turbine power [MWe], selected cycle ('binary' or
+            'flash'), utilization efficiency [-] and exergetic power
+            of the wellhead stream [MW]; NaN and '' when the analysis
+            fails.
         """
+        failed = (float('nan'), '', float('nan'), float('nan'))
         if not raw:
-            return float('nan'), ''
+            return failed
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
-                analysis = power_cycle.power_cycle_analysis(raw)
+                analysis = power_cycle.power_cycle_analysis(
+                    raw, self.request.power_cycle.to_params())
         except Exception:
-            return float('nan'), ''
+            return failed
         if not analysis or not analysis.get('success', False):
-            return float('nan'), ''
+            return failed
         return (_as_float(analysis.get('power_MWe')),
-                analysis.get('cycle') or '')
+                analysis.get('cycle') or '',
+                _as_float(analysis.get('eta_utilization')),
+                _as_float(analysis.get('exergy_rate_MW')))
 
     # ----------------------------------------------------------------
     # Steady state

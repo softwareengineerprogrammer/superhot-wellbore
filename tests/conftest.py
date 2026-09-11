@@ -49,6 +49,8 @@ def synthetic_profile():
             dP_reservoir_MPa=11.5,
             power_MWe=32.0,
             cycle='flash',
+            eta_utilization=0.4,
+            exergy_rate_MW=80.0,
             converged=True, success=True, solved=True)
 
     timesteps = interpolate_timesteps(times, solved)

@@ -45,6 +45,9 @@ def test_interpolated_values(synthetic_profile):
         'flow rate interpolated'
     assert interpolated.T_wellhead_C < interpolated.T_feedzone_C, \
         'wellhead below feedzone'
+    assert interpolated.eta_utilization == pytest.approx(0.4, abs=1e-9), \
+        'power cycle metrics interpolated'
+    assert interpolated.cycle == 'flash', 'cycle taken from nearest solve'
 
 
 def test_no_solves_means_no_success():

@@ -5,8 +5,9 @@ superhot-wellbore Client
 
 Stable interface through which an external program obtains a
 production history from the superhot-wellbore coupled
-reservoir-wellbore model. GEOPHIRES uses it for its Superhot Wellbore
-reservoir model (Reservoir Model 9, geophires_x/SuperhotWellboreReservoir.py).
+reservoir-wellbore model. GEOPHIRES uses it for its superhot production
+wellbore model ('Superhot Production Wellbore Model, True',
+geophires_x/SuperhotWellBores.py).
 
 The core modules solve a steady-state, single self-flowing well: given
 a far-field reservoir state (pressure, temperature, transmissivity)
@@ -45,8 +46,8 @@ one result per element of it, which is how GEOPHIRES calls it.
 
 File-based path
 ---------------
-For GEOPHIRES versions without the built-in Superhot Wellbore
-reservoir model, the command-line client (cli.py, export.py) writes a
+For GEOPHIRES versions without the built-in superhot production
+wellbore model, the command-line client (cli.py, export.py) writes a
 'time, temperature' profile plus a matching GEOPHIRES input deck
 fragment, which GEOPHIRES reads with its 'User-Provided Temperature
 Profile' reservoir model::
@@ -67,7 +68,7 @@ from .client import (SuperhotWellboreClient, solve_profile,
                      solve_steady_state)
 from .config import (CONTROL_MODES, DECLINE_MODES, HOLD_MODES,
                      ROCK_TEMPERATURE_MODES, DeclineConfig,
-                     OperatingConfig, ReservoirConfig,
+                     OperatingConfig, PowerCycleConfig, ReservoirConfig,
                      RockTemperatureConfig, SolverConfig,
                      SuperhotRequest, TimeConfig, WellConfig)
 from .export import (export_all, geophires_input_text,
@@ -92,6 +93,7 @@ __all__ = [
     'DeclineConfig',
     'TimeConfig',
     'SolverConfig',
+    'PowerCycleConfig',
     'DECLINE_MODES',
     'ROCK_TEMPERATURE_MODES',
     'CONTROL_MODES',

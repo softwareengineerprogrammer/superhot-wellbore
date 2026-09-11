@@ -114,7 +114,7 @@ def test_hold_flow_solves_once_for_pressure_then_prescribes_flow(monkeypatch):
                         fake_coupled_model)
     monkeypatch.setattr(client_module, 'power_cycle',
                         type('PC', (), {'power_cycle_analysis':
-                                        staticmethod(lambda raw: None)}))
+                                        staticmethod(lambda raw, params: None)}))
 
     request = SuperhotRequest.from_dict({
         'well': {'depth_m': 3500},

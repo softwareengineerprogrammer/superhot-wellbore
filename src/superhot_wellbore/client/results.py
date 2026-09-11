@@ -128,13 +128,19 @@ class TimestepResult:
     dP_reservoir_MPa : float
         Reservoir (Darcy) drawdown [MPa].
     power_MWe : float
-        Gross turbine power from power_cycle.py [MWe]. Diagnostic
-        only: it is never passed to GEOPHIRES, whose own surface
-        plant model computes the electricity output. It is reported
-        so that the two power estimates can be compared.
+        Gross turbine power from power_cycle.py [MWe], computed with
+        the request's PowerCycleConfig. The GEOPHIRES superhot power
+        cycle surface plant uses it; other GEOPHIRES surface plants
+        report it for comparison only.
     cycle : str
         Power cycle selected by power_cycle.py ('binary' or 'flash'),
-        empty when the power diagnostic was not computed.
+        empty when the power cycle analysis was not computed.
+    eta_utilization : float
+        Utilization efficiency of the power cycle at wellhead
+        conditions [-].
+    exergy_rate_MW : float
+        Exergetic power of the wellhead stream relative to the
+        ambient dead state [MW].
     choked : bool
         True if the wellbore reached the local sound speed.
     converged : bool
@@ -161,6 +167,8 @@ class TimestepResult:
     dP_reservoir_MPa: float = float('nan')
     power_MWe: float = float('nan')
     cycle: str = ''
+    eta_utilization: float = float('nan')
+    exergy_rate_MW: float = float('nan')
     choked: bool = False
     converged: bool = False
     success: bool = False
@@ -171,7 +179,8 @@ class TimestepResult:
     INTERPOLATED_FIELDS = ('mass_flow_kgs', 'whp_MPa', 'T_wellhead_C',
                            'h_wellhead_MJkg', 'T_feedzone_C',
                            'h_feedzone_MJkg', 'P_bh_MPa',
-                           'dP_reservoir_MPa', 'power_MWe')
+                           'dP_reservoir_MPa', 'power_MWe',
+                           'eta_utilization', 'exergy_rate_MW')
 
     def to_dict(self):
         """Return a JSON-safe dict (non-finite floats become None)."""
@@ -189,7 +198,7 @@ class ProductionProfile:
     Production history over the plant lifetime.
 
     This is the object handed to GEOPHIRES, either in process (by the
-    GEOPHIRES Superhot Wellbore reservoir model) or through the files
+    GEOPHIRES superhot production wellbore model) or through the files
     written by export.py.
     """
 
@@ -243,8 +252,23 @@ class ProductionProfile:
 
     @property
     def power_MWe(self):
-        """Diagnostic gross power history [MWe] (not sent to GEOPHIRES)."""
+        """Gross turbine power history of the power cycle [MWe]."""
         return self._series('power_MWe')
+
+    @property
+    def cycle(self):
+        """Power cycle selected at each timestep ('binary' or 'flash')."""
+        return self._series('cycle')
+
+    @property
+    def eta_utilization(self):
+        """Utilization efficiency history of the power cycle [-]."""
+        return self._series('eta_utilization')
+
+    @property
+    def exergy_rate_MW(self):
+        """Exergetic power history of the wellhead stream [MW]."""
+        return self._series('exergy_rate_MW')
 
     @property
     def P_reservoir_MPa(self):
@@ -334,7 +358,8 @@ class ProductionProfile:
                 self._mean('T_wellhead_C')),
             'mean_wellbore_temperature_drop_C': _clean(
                 self.mean_wellbore_temperature_drop_C),
-            'mean_power_MWe_diagnostic': _clean(self._mean('power_MWe')),
+            'initial_power_cycle': first.cycle if first else None,
+            'mean_power_MWe': _clean(self._mean('power_MWe')),
         }
 
     # ----------------------------------------------------------------

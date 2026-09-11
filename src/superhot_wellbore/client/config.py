@@ -19,7 +19,8 @@ written as a single JSON document:
       "operating":        {"control": "whp", ...},
       "decline":          {"temperature_mode": "linear_percent", ...},
       "time":             {"plant_lifetime_yr": 30, ...},
-      "solver":           {"max_solve_points": 8, ...}
+      "solver":           {"max_solve_points": 8, ...},
+      "power_cycle":      {"T_ambient_C": 10.0, ...}
     }
 
 Units follow the superhot-wellbore inter-module convention: MPa,
@@ -573,6 +574,73 @@ class SolverConfig:
             raise ValueError('tolerance_MPa must be positive')
 
 
+@dataclass
+class PowerCycleConfig:
+    """
+    Surface power cycle parameters for power_cycle.power_cycle_analysis().
+
+    The gross turbine power of every solved state is reported in
+    TimestepResult.power_MWe together with the cycle selected
+    ('binary' or 'flash'), the utilization efficiency and the exergetic
+    power of the wellhead stream. The defaults are those of
+    power_cycle.DEFAULT_POWER_PARAMS; see that module for the meaning
+    and the modelling assumptions (gross turbine power, fixed flash
+    and working-fluid pressures, pure water properties).
+
+    Attributes
+    ----------
+    T_ambient_C : float
+        Dead-state (ambient) temperature for exergy [C].
+    T_reject_C : float
+        Geofluid rejection temperature of the binary heat exchanger [C].
+    T_wf_inlet_C : float
+        Working fluid heat exchanger inlet temperature [C].
+    delta_T_pinch_C : float
+        Heat exchanger pinch point temperature difference [C].
+    P_wf_MPa : float
+        Working fluid pressure of the binary cycle [MPa].
+    P_condenser_MPa : float
+        Condenser pressure [MPa].
+    eta_turbine_dry : float
+        Dry isentropic turbine efficiency [-].
+    P_flash_MPa : float
+        Flash separation pressure of the flash cycle [MPa].
+    x_exit_min : float
+        Minimum acceptable turbine exit quality [-].
+    superheat_margin_Jkg : float
+        Enthalpy margin above saturated vapour for selecting the
+        binary cycle [J/kg].
+    """
+
+    T_ambient_C: float = 25.0
+    T_reject_C: float = 60.0
+    T_wf_inlet_C: float = 40.0
+    delta_T_pinch_C: float = 5.0
+    P_wf_MPa: float = 1.0
+    P_condenser_MPa: float = 0.01
+    eta_turbine_dry: float = 0.85
+    P_flash_MPa: float = 1.0
+    x_exit_min: float = 0.85
+    superheat_margin_Jkg: float = 50.0e3
+
+    def to_params(self):
+        """Return the params dict expected by power_cycle_analysis()."""
+        return dataclasses.asdict(self)
+
+    def validate(self):
+        """Raise ValueError if the section is inconsistent."""
+        for name in ('delta_T_pinch_C', 'P_wf_MPa', 'P_condenser_MPa',
+                     'P_flash_MPa'):
+            if getattr(self, name) <= 0:
+                raise ValueError(f'{name} must be positive')
+        if not 0 < self.eta_turbine_dry <= 1:
+            raise ValueError('eta_turbine_dry must be in (0, 1]')
+        if not 0 <= self.x_exit_min <= 1:
+            raise ValueError('x_exit_min must be in [0, 1]')
+        if self.T_reject_C <= self.T_wf_inlet_C:
+            raise ValueError('T_reject_C must exceed T_wf_inlet_C')
+
+
 # ====================================================================
 # TOP-LEVEL REQUEST
 # ====================================================================
@@ -596,6 +664,7 @@ class SuperhotRequest:
     decline: DeclineConfig = field(default_factory=DeclineConfig)
     time: TimeConfig = field(default_factory=TimeConfig)
     solver: SolverConfig = field(default_factory=SolverConfig)
+    power_cycle: PowerCycleConfig = field(default_factory=PowerCycleConfig)
 
     # ----------------------------------------------------------------
     # Serialisation
@@ -628,6 +697,8 @@ class SuperhotRequest:
             decline=_from_dict(DeclineConfig, data.get('decline')),
             time=_from_dict(TimeConfig, data.get('time')),
             solver=_from_dict(SolverConfig, data.get('solver')),
+            power_cycle=_from_dict(PowerCycleConfig,
+                                   data.get('power_cycle')),
         )
 
     def to_dict(self):
@@ -654,4 +725,5 @@ class SuperhotRequest:
         self.decline.validate()
         self.time.validate()
         self.solver.validate()
+        self.power_cycle.validate()
         return self

@@ -23,7 +23,7 @@ power_cycle
     efficiency.
 client
     Stable interface exposing the coupled model as a production
-    history, used by the GEOPHIRES Superhot Wellbore reservoir model.
+    history, used by the GEOPHIRES superhot production wellbore model.
 
 The submodules are not imported here: they pull in the IAPWS-95
 equation of state, which is expensive to load. Import what you need::

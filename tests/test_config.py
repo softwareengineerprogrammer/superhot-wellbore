@@ -42,6 +42,31 @@ def test_json_round_trip():
         'nested value survives'
 
 
+def test_power_cycle_section_round_trip():
+    """Power cycle parameters travel with the request and reach params."""
+    request = SuperhotRequest.from_dict({
+        'power_cycle': {'T_ambient_C': 10.0, 'P_flash_MPa': 0.8},
+    })
+    params = request.validate().power_cycle.to_params()
+    assert params['T_ambient_C'] == pytest.approx(10.0, abs=1e-9), \
+        'ambient temperature passed through'
+    assert params['P_flash_MPa'] == pytest.approx(0.8, abs=1e-9), \
+        'flash pressure passed through'
+    assert params['eta_turbine_dry'] == pytest.approx(0.85, abs=1e-9), \
+        'defaults fill the rest'
+    restored = SuperhotRequest.from_dict(
+        json.loads(json.dumps(request.to_dict())))
+    assert restored == request, 'JSON round trip with power cycle'
+
+
+def test_invalid_power_cycle_rejected():
+    """A rejection temperature below the working fluid inlet is caught."""
+    request = SuperhotRequest.from_dict(
+        {'power_cycle': {'T_reject_C': 30.0, 'T_wf_inlet_C': 40.0}})
+    with pytest.raises(ValueError):
+        request.validate()
+
+
 def test_unknown_section_rejected():
     """A misspelled section is an error, not a no-op."""
     with pytest.raises(ValueError):
