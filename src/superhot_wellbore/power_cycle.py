@@ -489,6 +489,55 @@ def power_cycle_analysis(coupled_result, params=None):
         return fail
 
 
+def dry_steam_specific_work(P_MPa, params=None):
+    """
+    Gross specific turbine work of saturated steam expanded from P.
+
+    One kg/s of saturated vapour at P_MPa is expanded to the
+    condenser pressure by _two_stage_turbine(), i.e. through the same
+    DiPippo/Baumann wet-stage model the flash cycle uses once its
+    separated steam enters the turbine. This is the dry-steam share of
+    a two-phase wellhead stream: a caller that separates the wellhead
+    mixture at WHP can price the steam fraction with this number and
+    the liquid fraction with any liquid-water correlation.
+
+    Parameters
+    ----------
+    P_MPa : float
+        Turbine inlet (separator) pressure [MPa]. Must lie above the
+        condenser pressure and below the critical pressure, where
+        saturated vapour exists.
+    params : dict or None
+        Power cycle parameters, merged over DEFAULT_POWER_PARAMS
+        (P_condenser_MPa, eta_turbine_dry and x_exit_min are used).
+
+    Returns
+    -------
+    float
+        Gross specific work [MJ/kg of steam], or NaN when P_MPa is
+        not a sub-critical pressure above the condenser pressure or
+        when the expansion fails.
+    """
+    pp = _merge_params(params)
+    try:
+        P = float(P_MPa)
+    except (TypeError, ValueError):
+        return np.nan
+    if not np.isfinite(P) or P >= _P_CRIT_MPa or P <= pp['P_condenser_MPa']:
+        return np.nan
+    try:
+        h_g = CP.PropsSI('H', 'P', P * 1e6, 'Q', 1, 'Water')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            result = _two_stage_turbine(1.0, h_g, P, pp)
+    except Exception:
+        return np.nan
+    if not result.get('success', False):
+        return np.nan
+    # power_MWe of a 1 kg/s stream is numerically the specific work in MJ/kg
+    return float(result['power_MWe'])
+
+
 # ====================================================================
 # CYCLE SELECTION
 # ====================================================================

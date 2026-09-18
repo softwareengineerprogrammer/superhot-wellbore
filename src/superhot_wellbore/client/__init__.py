@@ -44,6 +44,24 @@ In Python::
 Pass the caller's own time vector to solve_profile(time_yr=...) to get
 one result per element of it, which is how GEOPHIRES calls it.
 
+Production pumping
+------------------
+A prescribed flow rate that the well cannot deliver to the surface on
+its own is lifted by the production pump stage (pump.py), configured
+through the request's 'pump' section (PumpConfig). With the default
+mode 'auto' a self-flowing well is untouched; a well that does not
+reach the surface, or reaches it below the self-flow floor, gets a
+pump at the shallowest depth with a liquid column below it, and the
+timestep reports the pump depth, pressure rise and power alongside
+the pumped wellhead state.
+
+Prescribed inflow
+-----------------
+An external reservoir simulator can bypass the Darcy inflow model
+(ReservoirConfig.inflow = 'prescribed') and tabulate the feedzone
+pressure and enthalpy, and optionally the flow rate, against time in
+the 'decline' section.
+
 File-based path
 ---------------
 For GEOPHIRES versions without the built-in superhot production
@@ -67,13 +85,15 @@ from .. import __version__
 from .client import (SuperhotWellboreClient, solve_profile,
                      solve_steady_state)
 from .config import (CONTROL_MODES, DECLINE_MODES, HOLD_MODES,
+                     INFLOW_MODES, PUMP_ENVELOPES, PUMP_MODES,
                      ROCK_TEMPERATURE_MODES, DeclineConfig,
-                     OperatingConfig, PowerCycleConfig, ReservoirConfig,
-                     RockTemperatureConfig, SolverConfig,
+                     OperatingConfig, PowerCycleConfig, PumpConfig,
+                     ReservoirConfig, RockTemperatureConfig, SolverConfig,
                      SuperhotRequest, TimeConfig, WellConfig)
 from .export import (export_all, geophires_input_text,
                      write_geophires_input, write_profile_json,
                      write_request_json, write_temperature_profile)
+from .pump import PUMP_FLAGS, WELLHEAD_PHASES, solve_pumped_state
 from .results import (GEOPHIRES_RESERVOIR_MODEL_UPP,
                       PROFILE_TEMPERATURES, ProductionProfile,
                       TimestepResult)
@@ -94,10 +114,18 @@ __all__ = [
     'TimeConfig',
     'SolverConfig',
     'PowerCycleConfig',
+    'PumpConfig',
     'DECLINE_MODES',
     'ROCK_TEMPERATURE_MODES',
     'CONTROL_MODES',
     'HOLD_MODES',
+    'INFLOW_MODES',
+    'PUMP_MODES',
+    'PUMP_ENVELOPES',
+    # Pump stage
+    'solve_pumped_state',
+    'PUMP_FLAGS',
+    'WELLHEAD_PHASES',
     # Results
     'ProductionProfile',
     'TimestepResult',

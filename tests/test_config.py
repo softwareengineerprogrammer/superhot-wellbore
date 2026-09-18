@@ -18,7 +18,8 @@ import json
 import numpy as np
 import pytest
 
-from superhot_wellbore.client.config import (DeclineConfig,
+from superhot_wellbore.client.config import (DeclineConfig, PumpConfig,
+                                                       ReservoirConfig,
                                                        SuperhotRequest,
                                                        TimeConfig, WellConfig)
 
@@ -64,6 +65,95 @@ def test_invalid_power_cycle_rejected():
     request = SuperhotRequest.from_dict(
         {'power_cycle': {'T_reject_C': 30.0, 'T_wf_inlet_C': 40.0}})
     with pytest.raises(ValueError):
+        request.validate()
+
+
+def test_pump_section_round_trip():
+    """Pump parameters travel with the request and validate."""
+    request = SuperhotRequest.from_dict({
+        'pump': {'mode': 'always', 'efficiency': 0.75,
+                 'max_depth_m': 1200.0, 'envelope': 'enforce',
+                 'target_whp_MPa': 2.0},
+    })
+    pump = request.validate().pump
+    assert pump.mode == 'always' and pump.envelope == 'enforce', \
+        'values passed through'
+    assert pump.efficiency == pytest.approx(0.75, abs=1e-9), 'efficiency'
+    assert pump.npsh_margin_MPa == pytest.approx(0.3447, abs=1e-9), \
+        'defaults fill the rest'
+    assert SuperhotRequest().pump == PumpConfig(), \
+        'a request without a pump section gets the default pump'
+    restored = SuperhotRequest.from_dict(
+        json.loads(json.dumps(request.to_dict())))
+    assert restored == request, 'JSON round trip with pump'
+    assert 'pump' in request.to_dict(), 'the section is serialised'
+
+
+def test_unknown_pump_key_rejected():
+    """A misspelled pump key is an error."""
+    with pytest.raises(ValueError):
+        SuperhotRequest.from_dict({'pump': {'max_depth': 1500}})
+
+
+@pytest.mark.parametrize('bad', [
+    {'mode': 'sometimes'},
+    {'envelope': 'ignore'},
+    {'efficiency': 0.0},
+    {'efficiency': 1.5},
+    {'npsh_margin_MPa': -0.1},
+    {'max_depth_m': 0.0},
+    {'max_intake_temperature_C': -1.0},
+    {'tolerance_MPa': 0.0},
+    {'max_dP_MPa': 0.0},
+    {'target_whp_MPa': 0.0},
+])
+def test_invalid_pump_section_rejected(bad):
+    """Unknown modes and non-positive limits are caught by validate()."""
+    request = SuperhotRequest.from_dict({'pump': bad})
+    with pytest.raises(ValueError):
+        request.validate()
+
+
+def test_prescribed_inflow_needs_flow_control():
+    """Prescribed inflow with a WHP solve is contradictory."""
+    request = SuperhotRequest.from_dict({
+        'reservoir': {'inflow': 'prescribed'},
+        'operating': {'control': 'whp', 'target_whp_MPa': 5.0},
+        'decline': {'feedzone_profile': [[0.0, 20.0, 0.9]]},
+    })
+    with pytest.raises(ValueError, match="requires operating.control 'flow'"):
+        request.validate()
+
+
+def test_prescribed_inflow_needs_a_feedzone_profile():
+    """Prescribed inflow without a table has no feedzone state."""
+    request = SuperhotRequest.from_dict({
+        'reservoir': {'inflow': 'prescribed'},
+        'operating': {'control': 'flow', 'mass_flow_kgs': 60.0},
+    })
+    with pytest.raises(ValueError, match='feedzone_profile'):
+        request.validate()
+
+
+def test_prescribed_inflow_makes_transmissivity_optional():
+    """Without the Darcy model no transmissivity is needed."""
+    prescribed = ReservoirConfig(inflow='prescribed',
+                                 transmissivity_md_m=None)
+    prescribed.validate()
+    darcy = ReservoirConfig(inflow='darcy', transmissivity_md_m=None)
+    with pytest.raises(ValueError):
+        darcy.validate()
+    with pytest.raises(ValueError):
+        ReservoirConfig(inflow='table').validate()
+
+
+def test_mass_flow_profile_needs_flow_control():
+    """A tabulated flow rate cannot be combined with a WHP solve."""
+    request = SuperhotRequest.from_dict({
+        'operating': {'control': 'whp'},
+        'decline': {'mass_flow_profile': [[0.0, 60.0], [10.0, 50.0]]},
+    })
+    with pytest.raises(ValueError, match='mass_flow_profile'):
         request.validate()
 
 
@@ -188,6 +278,49 @@ def test_unknown_decline_mode_rejected():
     config = DeclineConfig(temperature_mode='guess')
     with pytest.raises(ValueError):
         config.validate()
+
+
+def test_feedzone_profile_interpolates_and_holds_the_ends():
+    """The prescribed feedzone state is interpolated in time."""
+    config = DeclineConfig(feedzone_profile=[[10.0, 18.0, 0.80],
+                                             [0.0, 20.0, 0.90]])
+    config.validate()
+    P, h = config.feedzone_states([0.0, 5.0, 10.0, 20.0])
+    assert np.allclose(P, [20.0, 19.0, 18.0, 18.0]), 'pressure, sorted'
+    assert np.allclose(h, [0.90, 0.85, 0.80, 0.80]), 'enthalpy, held'
+    assert DeclineConfig().feedzone_states([0.0]) is None, \
+        'no table, no states'
+    assert not config.is_steady(), 'a varying table is not steady'
+    assert DeclineConfig(feedzone_profile=[[0.0, 20.0, 0.9],
+                                           [5.0, 20.0, 0.9]]).is_steady(), \
+        'a constant table is steady'
+
+
+def test_mass_flow_profile_interpolates():
+    """The tabulated flow rate is interpolated per timestep."""
+    config = DeclineConfig(mass_flow_profile=[[0.0, 60.0], [20.0, 40.0]])
+    config.validate()
+    assert np.allclose(config.mass_flows_kgs(TIMES), [60.0, 50.0, 40.0]), \
+        'interpolated'
+    assert np.allclose(DeclineConfig().mass_flows_kgs(TIMES, 55.0), 55.0), \
+        'constant default without a table'
+    assert DeclineConfig().mass_flows_kgs(TIMES) is None, \
+        'no table, no default, no flows'
+    assert not config.is_steady(), 'a varying flow is not steady'
+
+
+@pytest.mark.parametrize('table, key', [
+    ([[0.0, 20.0]], 'feedzone_profile'),
+    ([[0.0, -1.0, 0.9]], 'feedzone_profile'),
+    ([[0.0, float('nan'), 0.9]], 'feedzone_profile'),
+    ([], 'feedzone_profile'),
+    ([[0.0, 60.0, 1.0]], 'mass_flow_profile'),
+    ([[0.0, 0.0]], 'mass_flow_profile'),
+])
+def test_malformed_profile_tables_rejected(table, key):
+    """Wrong widths, non-positive and non-finite entries are errors."""
+    with pytest.raises(ValueError):
+        DeclineConfig(**{key: table}).validate()
 
 
 # ====================================================================

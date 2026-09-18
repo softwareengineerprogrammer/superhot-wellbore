@@ -152,6 +152,36 @@ class TimestepResult:
         False if the values were interpolated between solves.
     message : str
         Diagnostic message, empty when nothing noteworthy happened.
+    pumped : bool
+        True if the production pump stage (pump.py) lifted the flow;
+        the wellhead values then belong to the pumped upper segment.
+    pump_depth_m : float
+        Pump intake (setting) depth [m], 0 when not pumped.
+    P_pump_intake_MPa, T_pump_intake_C : float
+        Fluid state at the pump intake, NaN when not pumped.
+    dP_pump_MPa : float
+        Pump pressure rise [MPa], 0 when not pumped.
+    pump_power_MWe : float
+        Pump power per well [MW], m dP / (rho eta), 0 when not pumped.
+    self_flow_whp_MPa : float
+        Wellhead pressure of the unpumped well [MPa], NaN when the
+        unpumped march did not reach the surface.
+    self_flowing : bool
+        True if the unpumped well reached the surface at or above the
+        self-flow floor (PumpConfig.min_self_flow_whp_MPa).
+    wellhead_phase : str
+        'single_phase_liquid', 'two_phase', 'single_phase_vapor' or
+        'supercritical' (wellhead pressure at or above 22.064 MPa);
+        empty when unknown.
+    wellhead_quality : float
+        Vapour mass fraction at the wellhead [-], NaN unless the
+        wellhead is two-phase.
+    dry_steam_work_MJkg : float
+        Gross specific turbine work of saturated steam expanded from
+        the wellhead pressure [MJ/kg] (power_cycle.
+        dry_steam_specific_work), NaN above the critical pressure.
+    pump_flags : list of str
+        Pump stage flags, a subset of pump.PUMP_FLAGS.
     """
 
     time_yr: float = 0.0
@@ -174,13 +204,33 @@ class TimestepResult:
     success: bool = False
     solved: bool = False
     message: str = ''
+    pumped: bool = False
+    pump_depth_m: float = 0.0
+    P_pump_intake_MPa: float = float('nan')
+    T_pump_intake_C: float = float('nan')
+    dP_pump_MPa: float = 0.0
+    pump_power_MWe: float = 0.0
+    self_flow_whp_MPa: float = float('nan')
+    self_flowing: bool = False
+    wellhead_phase: str = ''
+    wellhead_quality: float = float('nan')
+    dry_steam_work_MJkg: float = float('nan')
+    pump_flags: List[str] = field(default_factory=list)
 
     #: Numeric fields that can be interpolated between solved states
     INTERPOLATED_FIELDS = ('mass_flow_kgs', 'whp_MPa', 'T_wellhead_C',
                            'h_wellhead_MJkg', 'T_feedzone_C',
                            'h_feedzone_MJkg', 'P_bh_MPa',
                            'dP_reservoir_MPa', 'power_MWe',
-                           'eta_utilization', 'exergy_rate_MW')
+                           'eta_utilization', 'exergy_rate_MW',
+                           'pump_depth_m', 'P_pump_intake_MPa',
+                           'T_pump_intake_C', 'dP_pump_MPa',
+                           'pump_power_MWe', 'self_flow_whp_MPa',
+                           'wellhead_quality', 'dry_steam_work_MJkg')
+
+    #: Flag fields copied from the nearest successful solve
+    COPIED_FIELDS = ('cycle', 'choked', 'converged', 'pumped',
+                     'self_flowing', 'wellhead_phase')
 
     def to_dict(self):
         """Return a JSON-safe dict (non-finite floats become None)."""
@@ -280,6 +330,56 @@ class ProductionProfile:
         """Far-field reservoir temperature history [C]."""
         return self._series('T_reservoir_C')
 
+    @property
+    def pumped(self):
+        """Whether the production pump lifted the flow, per timestep."""
+        return self._series('pumped')
+
+    @property
+    def pump_power_MWe(self):
+        """Production pump power history per well [MW]."""
+        return self._series('pump_power_MWe')
+
+    @property
+    def pump_depth_m(self):
+        """Production pump intake depth history [m]."""
+        return self._series('pump_depth_m')
+
+    @property
+    def dP_pump_MPa(self):
+        """Production pump pressure rise history [MPa]."""
+        return self._series('dP_pump_MPa')
+
+    @property
+    def self_flow_whp_MPa(self):
+        """Unpumped wellhead pressure history [MPa] (NaN allowed)."""
+        return self._series('self_flow_whp_MPa')
+
+    @property
+    def self_flowing(self):
+        """Whether the unpumped well met the self-flow floor, per step."""
+        return self._series('self_flowing')
+
+    @property
+    def wellhead_phase(self):
+        """Wellhead phase label history."""
+        return self._series('wellhead_phase')
+
+    @property
+    def wellhead_quality(self):
+        """Wellhead vapour quality history [-] (NaN if single phase)."""
+        return self._series('wellhead_quality')
+
+    @property
+    def dry_steam_work_MJkg(self):
+        """Dry-steam specific turbine work history [MJ/kg]."""
+        return self._series('dry_steam_work_MJkg')
+
+    @property
+    def pump_flags(self):
+        """Pump flags per timestep (list of lists of str)."""
+        return self._series('pump_flags')
+
     # ----------------------------------------------------------------
     # Summary statistics
     # ----------------------------------------------------------------
@@ -305,6 +405,39 @@ class ProductionProfile:
         return any(ts.choked for ts in self.timesteps)
 
     @property
+    def any_pumped(self):
+        """True if the production pump is used at any usable timestep."""
+        return any(ts.pumped for ts in self.timesteps if ts.success)
+
+    @property
+    def self_flowing_fraction(self):
+        """
+        Fraction of usable timesteps at which the well self-flows.
+
+        NaN when no timestep is usable.
+        """
+        usable = [ts for ts in self.timesteps if ts.success]
+        if not usable:
+            return float('nan')
+        return sum(1 for ts in usable if ts.self_flowing) / len(usable)
+
+    @property
+    def dominant_wellhead_phase(self):
+        """
+        Wellhead phase label holding the most usable timesteps.
+
+        Empty when no timestep is usable or none reports a phase.
+        """
+        counts = {}
+        for ts in self.timesteps:
+            if ts.success and ts.wellhead_phase:
+                counts[ts.wellhead_phase] = counts.get(ts.wellhead_phase,
+                                                       0) + 1
+        if not counts:
+            return ''
+        return max(counts, key=lambda phase: (counts[phase], phase))
+
+    @property
     def initial(self):
         """First timestep with a usable solution, or None."""
         for ts in self.timesteps:
@@ -319,6 +452,14 @@ class ProductionProfile:
         if not values:
             return float('nan')
         return float(np.mean(values))
+
+    def _max(self, attribute):
+        """Maximum of an attribute over successful timesteps."""
+        values = [getattr(ts, attribute) for ts in self.timesteps
+                  if ts.success and np.isfinite(getattr(ts, attribute))]
+        if not values:
+            return float('nan')
+        return float(np.max(values))
 
     @property
     def mean_wellbore_temperature_drop_C(self):
@@ -360,6 +501,15 @@ class ProductionProfile:
                 self.mean_wellbore_temperature_drop_C),
             'initial_power_cycle': first.cycle if first else None,
             'mean_power_MWe': _clean(self._mean('power_MWe')),
+            'any_pumped': self.any_pumped,
+            'self_flowing_fraction': _clean(self.self_flowing_fraction),
+            'max_pump_depth_m': _clean(self._max('pump_depth_m')),
+            'mean_pump_power_MWe': _clean(self._mean('pump_power_MWe')),
+            'initial_self_flow_whp_MPa': _clean(
+                first.self_flow_whp_MPa if first else float('nan')),
+            'dominant_wellhead_phase': self.dominant_wellhead_phase,
+            'pump_flags': sorted({flag for ts in self.timesteps
+                                  if ts.success for flag in ts.pump_flags}),
         }
 
     # ----------------------------------------------------------------
@@ -386,6 +536,10 @@ class ProductionProfile:
                 'mass_flow_kgs': [_clean(v)
                                   for v in self.mass_flow_kgs],
                 'whp_MPa': [_clean(v) for v in self.whp_MPa],
+                'pump_power_MWe': [_clean(v)
+                                   for v in self.pump_power_MWe],
+                'pump_depth_m': [_clean(v) for v in self.pump_depth_m],
+                'wellhead_phase': list(self.wellhead_phase),
             },
             'timesteps': [ts.to_dict() for ts in self.timesteps],
         }
@@ -525,6 +679,29 @@ class ProductionProfile:
 # INTERPOLATION SUPPORT
 # ====================================================================
 
+def _quality_for_interpolation(qualities, phases):
+    """
+    Wellhead qualities with single-phase NaNs replaced by 0 or 1.
+
+    A liquid wellhead is the x = 0 limit of a two-phase one and a
+    vapour wellhead the x = 1 limit, so a timestep between a
+    two-phase solve and a single-phase solve gets a quality on the
+    line between them instead of NaN. A supercritical wellhead has no
+    quality; its NaN is kept and propagates.
+    """
+    filled = []
+    for quality, phase in zip(qualities, phases):
+        if np.isfinite(quality):
+            filled.append(float(quality))
+        elif phase == 'single_phase_liquid':
+            filled.append(0.0)
+        elif phase == 'single_phase_vapor':
+            filled.append(1.0)
+        else:
+            filled.append(float('nan'))
+    return filled
+
+
 def interpolate_timesteps(times_yr, solved_results,
                           P_reservoir_MPa=None, T_reservoir_C=None):
     """
@@ -547,12 +724,13 @@ def interpolate_timesteps(times_yr, solved_results,
     list of TimestepResult
         One entry per element of times_yr. Entries that were not
         solved, and solved entries that failed, are linearly
-        interpolated from the successful solves; flags are taken from
-        the nearest successful solve. A failed solve keeps solved=True
-        and a message saying that its values were interpolated, so
-        that the failure stays visible. When no solve succeeded,
-        nothing is interpolated and every unsolved entry reports
-        success=False.
+        interpolated from the successful solves; flags (cycle, choked,
+        converged, pumped, self_flowing, wellhead_phase, pump_flags)
+        are taken from the nearest successful solve. A failed solve
+        keeps solved=True and a message saying that its values were
+        interpolated, so that the failure stays visible. When no
+        solve succeeded, nothing is interpolated and every unsolved
+        entry reports success=False.
     """
     times = np.asarray(times_yr, dtype=float)
     good_indices = sorted(i for i, ts in solved_results.items()
@@ -577,6 +755,10 @@ def interpolate_timesteps(times_yr, solved_results,
         for attribute in TimestepResult.INTERPOLATED_FIELDS:
             values = [getattr(solved_results[i], attribute)
                       for i in good_indices]
+            if attribute == 'wellhead_quality':
+                values = _quality_for_interpolation(
+                    values, [solved_results[i].wellhead_phase
+                             for i in good_indices])
             setattr(result, attribute,
                     float(np.interp(t, good_times, values)))
 
@@ -590,9 +772,12 @@ def interpolate_timesteps(times_yr, solved_results,
             result.T_reservoir_C = float(T_reservoir_C[index])
         else:
             result.T_reservoir_C = reference.T_reservoir_C
-        result.cycle = reference.cycle
-        result.choked = reference.choked
-        result.converged = reference.converged
+        for attribute in TimestepResult.COPIED_FIELDS:
+            setattr(result, attribute, getattr(reference, attribute))
+        result.pump_flags = list(reference.pump_flags)
+        if result.wellhead_phase != 'two_phase':
+            # Quality is only defined for a two-phase wellhead
+            result.wellhead_quality = float('nan')
         result.success = True
         if failed is not None:
             result.message = ('coupled model failed at this state ('

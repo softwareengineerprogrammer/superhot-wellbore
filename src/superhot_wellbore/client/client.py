@@ -33,6 +33,20 @@ The client does three things the raw modules leave to the caller:
        SolverConfig.strict is set), and every result carries a
        success flag.
 
+    4. Pumps wells that do not self-flow. A prescribed flow rate the
+       reservoir cannot lift to the surface (or lifts below the
+       self-flow floor) goes through the production pump stage of
+       pump.py, governed by the request's PumpConfig; the wellhead
+       values of such a timestep are those of the pumped upper
+       segment and the pump depth, pressure rise and power are
+       reported alongside.
+
+    5. Accepts a prescribed feedzone state. With
+       ReservoirConfig.inflow = 'prescribed' the sandface pressure
+       and enthalpy come from DeclineConfig.feedzone_profile instead
+       of the Darcy model, so an external reservoir simulator can
+       drive the wellbore directly.
+
 Typical use::
 
     from superhot_wellbore.client import (
@@ -57,6 +71,8 @@ import numpy as np
 
 from .. import power_cycle
 from .. import reservoir as core
+from ..wellbore_physics import fluid_properties_Ph
+from . import pump as pump_module
 from . import results as results_module
 from .config import SuperhotRequest
 from .results import (ProductionProfile, TimestepResult,
@@ -199,7 +215,8 @@ class SuperhotWellboreClient:
     # ----------------------------------------------------------------
 
     def solve_state(self, P_reservoir_MPa, T_reservoir_C,
-                    previous_solution=None, mass_flow_kgs=None):
+                    previous_solution=None, mass_flow_kgs=None,
+                    feedzone_state=None):
         """
         Solve the coupled model at one far-field reservoir state.
 
@@ -216,24 +233,41 @@ class SuperhotWellboreClient:
             Prescribe this flow rate instead of following the
             request's operating control, and compute the resulting
             wellhead pressure. Used to hold the flow rate constant
-            along a history (OperatingConfig.hold = 'flow').
+            along a history (OperatingConfig.hold = 'flow') and to
+            follow DeclineConfig.mass_flow_profile.
+        feedzone_state : (float, float) or None
+            Prescribed feedzone pressure [MPa] and enthalpy [MJ/kg]
+            for ReservoirConfig.inflow = 'prescribed'; the Darcy
+            inflow model is then bypassed. Requires a flow rate.
 
         Returns
         -------
         (TimestepResult, dict)
             The translated result and the raw dict returned by
-            reservoir.py, the latter being reusable as
+            reservoir.py or pump.py, the latter being reusable as
             previous_solution and as input to
             power_cycle.power_cycle_analysis().
+
+        Notes
+        -----
+        Prescribed-flow solves go through the production pump stage
+        (pump.solve_pumped_state) unless PumpConfig.mode is 'never'
+        with Darcy inflow, in which case reservoir.coupled_model()
+        is called exactly as before. A wellhead pressure solve
+        (control = 'whp' without a held flow) never pumps.
         """
         operating = self.request.operating
         solver = self.request.solver
+        pump_cfg = self.request.pump
+        prescribed_inflow = self.request.reservoir.inflow == 'prescribed'
         reservoir_params = self.request.reservoir.to_reservoir_params()
         well_params = self._well_params()
         rock_temperatures = self._rock_temperatures(T_reservoir_C)
 
         if mass_flow_kgs is None and operating.control == 'flow':
             mass_flow_kgs = operating.mass_flow_kgs
+        if prescribed_inflow and feedzone_state is None:
+            feedzone_state = self._feedzone_state_at(0.0)
 
         raw = None
         with warnings.catch_warnings():
@@ -252,7 +286,11 @@ class SuperhotWellboreClient:
                         previous_solution=previous_solution,
                         tolerance_MPa=solver.tolerance_MPa,
                         verbose=solver.verbose)
-                else:
+                elif prescribed_inflow:
+                    raw = self._solve_prescribed_inflow(
+                        mass_flow_kgs, P_reservoir_MPa, feedzone_state,
+                        rock_temperatures, well_params)
+                elif pump_cfg.mode == 'never':
                     raw = core.coupled_model(
                         mass_flow_rate=mass_flow_kgs,
                         P_reservoir_MPa=P_reservoir_MPa,
@@ -260,6 +298,10 @@ class SuperhotWellboreClient:
                         rock_temperatures=rock_temperatures,
                         reservoir_params=reservoir_params,
                         well_params=well_params)
+                else:
+                    raw = self._solve_darcy_pumped(
+                        mass_flow_kgs, P_reservoir_MPa, T_reservoir_C,
+                        rock_temperatures, reservoir_params, well_params)
             except Exception as exc:
                 result = TimestepResult(
                     P_reservoir_MPa=float(P_reservoir_MPa),
@@ -273,6 +315,62 @@ class SuperhotWellboreClient:
             (result.power_MWe, result.cycle, result.eta_utilization,
              result.exergy_rate_MW) = self._power_cycle(raw)
         return result, raw
+
+    def _solve_darcy_pumped(self, mass_flow_kgs, P_reservoir_MPa,
+                            T_reservoir_C, rock_temperatures,
+                            reservoir_params, well_params):
+        """
+        Darcy inflow followed by the pump stage.
+
+        The feedzone state is what reservoir.coupled_model() computes
+        (reservoir.bottomhole_pressure); the march from there is
+        delegated to pump.solve_pumped_state, which reproduces
+        coupled_model()'s values for a self-flowing well.
+        """
+        bh = core.bottomhole_pressure(
+            mass_flow_kgs, P_reservoir_MPa, T_reservoir_C,
+            reservoir_params, well_params)
+        return pump_module.solve_pumped_state(
+            P_fz_MPa=bh['P_bh_MPa'],
+            h_fz_Jkg=bh['h_feedzone_Jkg'],
+            mdot=mass_flow_kgs,
+            rock_temperatures=rock_temperatures,
+            well_params=well_params,
+            pump_cfg=self.request.pump,
+            P_farfield_MPa=P_reservoir_MPa,
+            T_feedzone_C=bh['T_feedzone_C'],
+            power_params=self.request.power_cycle.to_params(),
+            dP_reservoir_MPa=bh['dP_reservoir_MPa'])
+
+    def _solve_prescribed_inflow(self, mass_flow_kgs, P_reservoir_MPa,
+                                 feedzone_state, rock_temperatures,
+                                 well_params):
+        """
+        Pump stage from a prescribed feedzone state, no Darcy model.
+
+        The feedzone temperature is derived from the prescribed
+        (P, h) with the same equation of state the march uses.
+        """
+        P_fz_MPa, h_fz_MJkg = (float(v) for v in feedzone_state)
+        h_fz_Jkg = h_fz_MJkg * 1e6
+        feedzone = fluid_properties_Ph(P_fz_MPa, h_fz_Jkg)
+        return pump_module.solve_pumped_state(
+            P_fz_MPa=P_fz_MPa,
+            h_fz_Jkg=h_fz_Jkg,
+            mdot=mass_flow_kgs,
+            rock_temperatures=rock_temperatures,
+            well_params=well_params,
+            pump_cfg=self.request.pump,
+            P_farfield_MPa=P_reservoir_MPa,
+            T_feedzone_C=feedzone['temperature_K'] - 273.15,
+            power_params=self.request.power_cycle.to_params())
+
+    def _feedzone_state_at(self, time_yr):
+        """Prescribed (P_fz_MPa, h_fz_MJkg) at one time, or None."""
+        states = self.request.decline.feedzone_states([float(time_yr)])
+        if states is None:
+            return None
+        return float(states[0][0]), float(states[1][0])
 
     def _translate(self, raw, P_reservoir_MPa, T_reservoir_C):
         """Convert a reservoir.py output dict into a TimestepResult."""
@@ -299,6 +397,23 @@ class SuperhotWellboreClient:
         result.converged = bool(
             raw.get('converged', raw.get('success', False)))
 
+        # Pump stage keys (pump.solve_pumped_state); absent from a
+        # plain reservoir.py dict, which describes a self-flowing well.
+        result.pumped = bool(raw.get('pumped', False))
+        result.pump_depth_m = _as_float(raw.get('pump_depth_m', 0.0))
+        result.P_pump_intake_MPa = _as_float(raw.get('P_pump_intake_MPa'))
+        result.T_pump_intake_C = _as_float(raw.get('T_pump_intake_C'))
+        result.dP_pump_MPa = _as_float(raw.get('dP_pump_MPa', 0.0))
+        result.pump_power_MWe = _as_float(raw.get('pump_power_MWe', 0.0))
+        result.self_flow_whp_MPa = _as_float(raw.get('self_flow_whp_MPa'))
+        result.self_flowing = bool(raw.get('self_flowing', False))
+        result.wellhead_phase = str(raw.get('wellhead_phase') or '')
+        result.wellhead_quality = _as_float(raw.get('wellhead_quality'))
+        result.dry_steam_work_MJkg = _as_float(
+            raw.get('dry_steam_work_MJkg'))
+        result.pump_flags = [str(flag) for flag in raw.get('pump_flags')
+                             or []]
+
         result.success = bool(raw.get('success', False))
         if result.success:
             # Guard against a nominally successful solve that did not
@@ -317,6 +432,8 @@ class SuperhotWellboreClient:
                 result.success = False
                 result.message = ('the coupled model reported a '
                                   'non-positive mass flow rate')
+        elif raw.get('message'):
+            result.message = str(raw['message'])
         else:
             result.message = ('the coupled model did not reach the '
                               'surface at this reservoir state')
@@ -411,10 +528,15 @@ class SuperhotWellboreClient:
         if times.size == 0:
             raise ValueError('The time vector must not be empty')
 
-        pressures = self.request.decline.pressures_MPa(
+        decline = self.request.decline
+        pressures = decline.pressures_MPa(
             times, self.request.reservoir.P_reservoir_MPa)
-        temperatures = self.request.decline.temperatures_C(
+        temperatures = decline.temperatures_C(
             times, self.request.reservoir.T_reservoir_C)
+        # Prescribed flow rate series (mass_flow_profile), if any, and
+        # prescribed feedzone states (inflow = 'prescribed'), if any.
+        flows = decline.mass_flows_kgs(times)
+        feedzone_states = decline.feedzone_states(times)
 
         indices = self._solve_indices(times.size)
         notes = list(self.notes)
@@ -426,10 +548,18 @@ class SuperhotWellboreClient:
         held_flow_kgs = None
 
         for index in indices:
+            flow_kgs = held_flow_kgs
+            if flows is not None:
+                flow_kgs = float(flows[index])
+            feedzone_state = None
+            if feedzone_states is not None:
+                feedzone_state = (float(feedzone_states[0][index]),
+                                  float(feedzone_states[1][index]))
             result, raw = self.solve_state(
                 pressures[index], temperatures[index],
                 previous_solution=previous,
-                mass_flow_kgs=held_flow_kgs)
+                mass_flow_kgs=flow_kgs,
+                feedzone_state=feedzone_state)
             result.time_yr = float(times[index])
             solved[index] = result
 
@@ -489,6 +619,21 @@ class SuperhotWellboreClient:
             profile.notes.append(
                 'At least one timestep is choke limited, so the '
                 'reported wellhead pressure exceeds the target')
+        if profile.any_pumped:
+            pumped = [ts for ts in profile.timesteps
+                      if ts.success and ts.pumped]
+            profile.notes.append(
+                f'Production pump used at {len(pumped)} of '
+                f'{profile.n_timesteps} timesteps (intake depth up to '
+                f'{max(ts.pump_depth_m for ts in pumped):.0f} m, '
+                f'pump power up to '
+                f'{max(ts.pump_power_MWe for ts in pumped):.3f} MW per '
+                f'well); the wellhead values are those of the pumped '
+                f'well')
+            flags = sorted({flag for ts in pumped for flag in ts.pump_flags})
+            if flags:
+                profile.notes.append(
+                    'Pump flags raised: ' + ', '.join(flags))
         return profile
 
     def _solve_indices(self, n_timesteps):

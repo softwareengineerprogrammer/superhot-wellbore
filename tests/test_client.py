@@ -124,6 +124,10 @@ def test_hold_flow_solves_once_for_pressure_then_prescribes_flow(monkeypatch):
                     'pressure_rate_per_year': 1.0},
         'time': {'plant_lifetime_yr': 3, 'timesteps_per_year': 1},
         'solver': {'max_solve_points': 3},
+        # With the pump switched off the held-flow solves go straight
+        # to reservoir.coupled_model(); see test_pump.py for the
+        # pumped route.
+        'pump': {'mode': 'never'},
     })
     profile = SuperhotWellboreClient(request).solve_profile()
 
@@ -142,3 +146,100 @@ def test_unknown_hold_mode_rejected():
     request = SuperhotRequest.from_dict({'operating': {'hold': 'temperature'}})
     with pytest.raises(ValueError):
         request.validate()
+
+
+# ====================================================================
+# PRESCRIBED INFLOW AND FLOW SERIES
+# ====================================================================
+
+def _pumped_dict(mdot, P_fz, h_fz_Jkg):
+    """A canned pump-stage result echoing its inputs."""
+    return {'success': True, 'mass_flow_kgs': mdot, 'whp_MPa': 2.0,
+            'T_surface_C': 200.0, 'h_surface_MJkg': 0.85,
+            'T_feedzone_C': 210.0, 'h_feedzone_MJkg': h_fz_Jkg * 1e-6,
+            'P_bh_MPa': P_fz, 'dP_reservoir_MPa': 30.0 - P_fz,
+            'choked': False, 'pumped': False, 'self_flowing': True,
+            'wellhead_phase': 'single_phase_liquid', 'pump_flags': []}
+
+
+def test_prescribed_inflow_bypasses_the_darcy_model(monkeypatch):
+    """With inflow 'prescribed' the feedzone state comes from the table."""
+    from superhot_wellbore.client import client as client_module
+
+    seen = []
+
+    def fake_solve_pumped_state(**kwargs):
+        seen.append(kwargs)
+        return _pumped_dict(kwargs['mdot'], kwargs['P_fz_MPa'],
+                            kwargs['h_fz_Jkg'])
+
+    def boom(*args, **kwargs):
+        raise AssertionError('the Darcy model must not be called')
+
+    monkeypatch.setattr(client_module.core, 'bottomhole_pressure', boom)
+    monkeypatch.setattr(client_module.core, 'coupled_model', boom)
+    monkeypatch.setattr(client_module.core, 'solve_flow_for_whp', boom)
+    monkeypatch.setattr(client_module.pump_module, 'solve_pumped_state',
+                        fake_solve_pumped_state)
+
+    request = SuperhotRequest.from_dict({
+        'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 220.0,
+                      'inflow': 'prescribed', 'transmissivity_md_m': None},
+        'well': {'depth_m': 3000},
+        'operating': {'control': 'flow', 'mass_flow_kgs': 60.0},
+        'decline': {'feedzone_profile': [[0.0, 22.0, 0.95],
+                                         [2.0, 20.0, 0.90]]},
+        'time': {'plant_lifetime_yr': 2, 'timesteps_per_year': 1},
+        'solver': {'max_solve_points': 0},
+    })
+    profile = SuperhotWellboreClient(request).solve_profile()
+
+    assert len(seen) == 2, 'one pump-stage solve per timestep'
+    assert [call['P_fz_MPa'] for call in seen] == [22.0, 20.0], \
+        'feedzone pressure from the table'
+    assert [call['h_fz_Jkg'] for call in seen] == \
+        pytest.approx([0.95e6, 0.90e6]), 'feedzone enthalpy in J/kg'
+    assert seen[0]['P_farfield_MPa'] == 30.0, 'far-field pressure'
+    assert 200.0 < seen[0]['T_feedzone_C'] < 230.0, \
+        'feedzone temperature derived from (P, h), got ' + \
+        str(seen[0]['T_feedzone_C'])
+    assert seen[0]['mdot'] == 60.0, 'the operating flow rate'
+    assert profile.timesteps[1].P_bh_MPa == pytest.approx(20.0), \
+        'translated feedzone pressure'
+    assert profile.n_failed == 0, 'every timestep usable'
+
+
+def test_mass_flow_profile_is_honoured_per_timestep(monkeypatch):
+    """A tabulated flow rate is passed to every solve, interpolated."""
+    from superhot_wellbore.client import client as client_module
+
+    flows = []
+
+    def fake_solve_pumped_state(**kwargs):
+        flows.append(kwargs['mdot'])
+        return _pumped_dict(kwargs['mdot'], kwargs['P_fz_MPa'],
+                            kwargs['h_fz_Jkg'])
+
+    monkeypatch.setattr(
+        client_module.core, 'bottomhole_pressure',
+        lambda mdot, P, T, rp=None, wp=None, max_iterations=3:
+        {'P_bh_MPa': P - 0.1 * mdot, 'h_feedzone_Jkg': 0.9e6,
+         'T_feedzone_C': T - 1.0, 'dP_reservoir_MPa': 0.1 * mdot})
+    monkeypatch.setattr(client_module.pump_module, 'solve_pumped_state',
+                        fake_solve_pumped_state)
+
+    request = SuperhotRequest.from_dict({
+        'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 220.0},
+        'well': {'depth_m': 3000},
+        'operating': {'control': 'flow', 'mass_flow_kgs': 60.0},
+        'decline': {'mass_flow_profile': [[0.0, 60.0], [4.0, 40.0]]},
+        'solver': {'max_solve_points': 3},
+    })
+    profile = SuperhotWellboreClient(request).solve_profile(
+        time_yr=[0.0, 1.0, 2.0, 3.0, 4.0])
+
+    assert flows == pytest.approx([60.0, 50.0, 40.0]), \
+        'interpolated flow rate at each solved index (0, 2, 4)'
+    assert profile.mass_flow_kgs == pytest.approx(
+        [60.0, 55.0, 50.0, 45.0, 40.0]), 'flow rate history'
+    assert profile.n_solved == 3, 'three solves'

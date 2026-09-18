@@ -20,7 +20,8 @@ written as a single JSON document:
       "decline":          {"temperature_mode": "linear_percent", ...},
       "time":             {"plant_lifetime_yr": 30, ...},
       "solver":           {"max_solve_points": 8, ...},
-      "power_cycle":      {"T_ambient_C": 10.0, ...}
+      "power_cycle":      {"T_ambient_C": 10.0, ...},
+      "pump":             {"mode": "auto", ...}
     }
 
 Units follow the superhot-wellbore inter-module convention: MPa,
@@ -37,6 +38,24 @@ client re-solves the coupled reservoir-wellbore model along that
 path (see client.py). With the default 'none' modes the reservoir
 state is constant and the resulting history is flat, which is the
 honest representation of a purely steady-state model.
+
+Production pumping
+------------------
+A prescribed flow rate that the well cannot deliver to the surface,
+or delivers below a minimum wellhead pressure, is lifted by a
+production pump described by the PumpConfig section (see pump.py).
+With the default mode 'auto' the pump is only used when the well
+does not self-flow, so a self-flowing superhot well is solved
+exactly as before.
+
+Prescribed inflow
+-----------------
+The Darcy inflow model can be bypassed by setting
+ReservoirConfig.inflow = 'prescribed' and tabulating the feedzone
+state (pressure and enthalpy) and, optionally, the flow rate against
+time in DeclineConfig. This lets an external reservoir simulator
+supply the sandface state directly; it requires a prescribed flow
+rate (OperatingConfig.control = 'flow').
 
 Author: superhot-wellbore GEOPHIRES client
 """
@@ -71,6 +90,19 @@ CONTROL_MODES = ('whp', 'flow')
 
 # Quantities that OperatingConfig can hold constant over a history
 HOLD_MODES = ('whp', 'flow')
+
+# Inflow models recognised by ReservoirConfig
+INFLOW_MODES = ('darcy', 'prescribed')
+
+# Production pump modes recognised by PumpConfig
+PUMP_MODES = ('never', 'auto', 'always')
+
+# Pump envelope policies recognised by PumpConfig
+PUMP_ENVELOPES = ('flag', 'enforce')
+
+# NPSH margin GEOPHIRES keeps between the pump intake pressure and the
+# vapour pressure of the produced water, in MPa (WellBores.py: 344.7 kPa)
+DEFAULT_PUMP_NPSH_MARGIN_MPA = 0.3447
 
 
 # ====================================================================
@@ -158,6 +190,43 @@ def _decline_series(mode, rate_per_year, table, times_yr,
     return np.maximum(values, float(floor))
 
 
+def _profile_table(table, n_columns, label):
+    """
+    Validate and sort a [[time_yr, value, ...], ...] table.
+
+    Parameters
+    ----------
+    table : list or None
+        Rows of n_columns numbers, the first being the time [yr].
+    n_columns : int
+        Expected number of entries per row.
+    label : str
+        Table name, used in error messages.
+
+    Returns
+    -------
+    ndarray or None
+        The table sorted by time, or None when no table was given.
+    """
+    if table is None:
+        return None
+    arr = np.asarray(table, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != n_columns or arr.shape[0] == 0:
+        raise ValueError(f'{label} must be a non-empty list of rows '
+                         f'with {n_columns} numbers each')
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f'{label} must contain only finite numbers')
+    return arr[np.argsort(arr[:, 0])]
+
+
+def _table_varies(table, n_columns, label):
+    """True if any value column of a profile table changes with time."""
+    arr = _profile_table(table, n_columns, label)
+    if arr is None or arr.shape[0] < 2:
+        return False
+    return bool(np.any(np.ptp(arr[:, 1:], axis=0) > 0.0))
+
+
 # ====================================================================
 # CONFIGURATION SECTIONS
 # ====================================================================
@@ -183,6 +252,16 @@ class ReservoirConfig:
         Feedzone thickness [m].
     drainage_radius_m : float
         Distance to the constant-pressure outer boundary [m].
+    inflow : str
+        'darcy'      - feedzone state from the radial Darcy drawdown
+                       of reservoir.py (the default)
+        'prescribed' - feedzone pressure and enthalpy tabulated
+                       against time in DeclineConfig.feedzone_profile;
+                       no Darcy model, so the transmissivity is not
+                       needed. P_reservoir_MPa then only sets the
+                       far-field pressure the reported reservoir
+                       drawdown refers to, and T_reservoir_C the
+                       formation temperature profile.
     """
 
     P_reservoir_MPa: float = 30.0
@@ -191,6 +270,7 @@ class ReservoirConfig:
     permeability_md: Optional[float] = None
     thickness_m: Optional[float] = None
     drainage_radius_m: float = 500.0
+    inflow: str = 'darcy'
 
     def to_reservoir_params(self):
         """
@@ -218,7 +298,11 @@ class ReservoirConfig:
             raise ValueError('T_reservoir_C must be positive')
         if self.drainage_radius_m <= 0:
             raise ValueError('drainage_radius_m must be positive')
-        if self.transmissivity_md_m is None:
+        if self.inflow not in INFLOW_MODES:
+            raise ValueError(
+                f'Unknown inflow mode {self.inflow!r}. Valid modes: '
+                f'{", ".join(INFLOW_MODES)}')
+        if self.inflow == 'darcy' and self.transmissivity_md_m is None:
             if self.permeability_md is None or self.thickness_m is None:
                 raise ValueError(
                     'Provide either transmissivity_md_m, or both '
@@ -435,6 +519,16 @@ class DeclineConfig:
         Lower bound on reservoir temperature [C].
     min_pressure_MPa : float
         Lower bound on reservoir pressure [MPa].
+    feedzone_profile : list or None
+        Explicit [[time_yr, P_feedzone_MPa, h_feedzone_MJkg], ...]
+        table of the sandface state, used when
+        ReservoirConfig.inflow = 'prescribed'. Interpolated linearly
+        in time and held at the end values outside the table.
+    mass_flow_profile : list or None
+        Explicit [[time_yr, mass_flow_kgs], ...] table of the
+        produced flow rate per well, overriding
+        OperatingConfig.mass_flow_kgs at every timestep. Requires
+        OperatingConfig.control = 'flow'.
     """
 
     temperature_mode: str = 'none'
@@ -446,6 +540,9 @@ class DeclineConfig:
     pressure_rate_per_year: float = 0.0
     pressure_profile: Optional[List[List[float]]] = None
     min_pressure_MPa: float = 5.0
+
+    feedzone_profile: Optional[List[List[float]]] = None
+    mass_flow_profile: Optional[List[List[float]]] = None
 
     def temperatures_C(self, times_yr, T_initial_C):
         """Reservoir temperature [C] at each time in times_yr."""
@@ -463,10 +560,58 @@ class DeclineConfig:
                                times_yr, P_initial_MPa,
                                self.min_pressure_MPa, 'pressure')
 
+    def feedzone_states(self, times_yr):
+        """
+        Prescribed feedzone state at each time in times_yr.
+
+        Returns
+        -------
+        (ndarray, ndarray) or None
+            Feedzone pressure [MPa] and enthalpy [MJ/kg] at each time,
+            or None when no feedzone_profile is given.
+        """
+        table = _profile_table(self.feedzone_profile, 3,
+                               'feedzone_profile')
+        if table is None:
+            return None
+        t = np.asarray(times_yr, dtype=float)
+        return (np.interp(t, table[:, 0], table[:, 1]),
+                np.interp(t, table[:, 0], table[:, 2]))
+
+    def mass_flows_kgs(self, times_yr, default_kgs=None):
+        """
+        Prescribed flow rate at each time in times_yr.
+
+        Returns
+        -------
+        ndarray or None
+            Flow rate [kg/s] at each time from mass_flow_profile, the
+            constant default_kgs when there is no table, or None when
+            neither is given.
+        """
+        table = _profile_table(self.mass_flow_profile, 2,
+                               'mass_flow_profile')
+        t = np.asarray(times_yr, dtype=float)
+        if table is None:
+            if default_kgs is None:
+                return None
+            return np.full(t.shape, float(default_kgs))
+        return np.interp(t, table[:, 0], table[:, 1])
+
     def is_steady(self):
-        """True if neither pressure nor temperature varies with time."""
+        """
+        True if the reservoir state does not vary with time.
+
+        Neither pressure nor temperature declines, and neither the
+        prescribed feedzone state nor the prescribed flow rate
+        changes between the rows of its table.
+        """
         return (self.temperature_mode == 'none'
-                and self.pressure_mode == 'none')
+                and self.pressure_mode == 'none'
+                and not _table_varies(self.feedzone_profile, 3,
+                                      'feedzone_profile')
+                and not _table_varies(self.mass_flow_profile, 2,
+                                      'mass_flow_profile'))
 
     def validate(self):
         """Raise ValueError if the section is inconsistent."""
@@ -486,6 +631,16 @@ class DeclineConfig:
             raise ValueError('min_temperature_C must be positive')
         if self.min_pressure_MPa <= 0:
             raise ValueError('min_pressure_MPa must be positive')
+        feedzone = _profile_table(self.feedzone_profile, 3,
+                                  'feedzone_profile')
+        if feedzone is not None and np.any(feedzone[:, 1:] <= 0):
+            raise ValueError('feedzone_profile pressures and enthalpies '
+                             'must be positive')
+        flows = _profile_table(self.mass_flow_profile, 2,
+                               'mass_flow_profile')
+        if flows is not None and np.any(flows[:, 1] <= 0):
+            raise ValueError('mass_flow_profile flow rates must be '
+                             'positive')
 
 
 @dataclass
@@ -641,6 +796,90 @@ class PowerCycleConfig:
             raise ValueError('T_reject_C must exceed T_wf_inlet_C')
 
 
+@dataclass
+class PumpConfig:
+    """
+    Production pump for wells that do not self-flow (see pump.py).
+
+    The pump stage applies to prescribed-flow solves (control =
+    'flow', a held flow rate, or a mass_flow_profile). A wellhead
+    pressure solve (control = 'whp') finds the flow rate the well
+    delivers by itself, so it never pumps.
+
+    Attributes
+    ----------
+    mode : str
+        'never'  - never pump; a well that does not reach the surface
+                   fails as before
+        'auto'   - pump only when the unpumped well does not reach the
+                   surface, or reaches it below the self-flow floor
+        'always' - pump whenever a liquid intake exists
+    efficiency : float
+        Pump (hydraulic times motor) efficiency [-].
+    npsh_margin_MPa : float
+        Margin the intake pressure must keep above the vapour pressure
+        of the fluid at the intake temperature [MPa]; the same rule
+        selects the pumped wellhead pressure so the wellhead stream
+        stays liquid.
+    min_self_flow_whp_MPa : float
+        Wellhead pressure below which a self-flowing well is pumped
+        anyway [MPa] (mode 'auto').
+    max_depth_m : float
+        Deepest acceptable pump setting depth [m].
+    max_intake_temperature_C : float
+        Hottest acceptable pump intake temperature [C].
+    envelope : str
+        'flag'    - model the pump outside max_depth_m /
+                    max_intake_temperature_C and report it in
+                    pump_flags
+        'enforce' - fail the solve when the pump is needed outside
+                    the envelope or when no liquid intake exists
+    target_whp_MPa : float or None
+        Pumped wellhead pressure [MPa]. None selects the vapour
+        pressure at the intake temperature plus npsh_margin_MPa.
+    tolerance_MPa : float
+        Convergence tolerance on the pumped wellhead pressure [MPa].
+    max_dP_MPa : float
+        Upper bound of the pump pressure rise searched [MPa].
+    """
+
+    mode: str = 'auto'
+    efficiency: float = 0.80
+    npsh_margin_MPa: float = DEFAULT_PUMP_NPSH_MARGIN_MPA
+    min_self_flow_whp_MPa: float = 1.0
+    max_depth_m: float = 1500.0
+    max_intake_temperature_C: float = 250.0
+    envelope: str = 'flag'
+    target_whp_MPa: Optional[float] = None
+    tolerance_MPa: float = 0.01
+    max_dP_MPa: float = 60.0
+
+    def validate(self):
+        """Raise ValueError if the section is inconsistent."""
+        if self.mode not in PUMP_MODES:
+            raise ValueError(
+                f'Unknown pump mode {self.mode!r}. Valid modes: '
+                f'{", ".join(PUMP_MODES)}')
+        if self.envelope not in PUMP_ENVELOPES:
+            raise ValueError(
+                f'Unknown pump envelope policy {self.envelope!r}. '
+                f'Valid policies: {", ".join(PUMP_ENVELOPES)}')
+        if not 0 < self.efficiency <= 1:
+            raise ValueError('efficiency must be in (0, 1]')
+        if self.npsh_margin_MPa < 0:
+            raise ValueError('npsh_margin_MPa must not be negative')
+        if self.min_self_flow_whp_MPa < 0:
+            raise ValueError('min_self_flow_whp_MPa must not be '
+                             'negative')
+        for name in ('max_depth_m', 'max_intake_temperature_C',
+                     'tolerance_MPa', 'max_dP_MPa'):
+            if getattr(self, name) <= 0:
+                raise ValueError(f'{name} must be positive')
+        if self.target_whp_MPa is not None and self.target_whp_MPa <= 0:
+            raise ValueError('target_whp_MPa must be positive when '
+                             'provided')
+
+
 # ====================================================================
 # TOP-LEVEL REQUEST
 # ====================================================================
@@ -665,6 +904,7 @@ class SuperhotRequest:
     time: TimeConfig = field(default_factory=TimeConfig)
     solver: SolverConfig = field(default_factory=SolverConfig)
     power_cycle: PowerCycleConfig = field(default_factory=PowerCycleConfig)
+    pump: PumpConfig = field(default_factory=PumpConfig)
 
     # ----------------------------------------------------------------
     # Serialisation
@@ -699,6 +939,7 @@ class SuperhotRequest:
             solver=_from_dict(SolverConfig, data.get('solver')),
             power_cycle=_from_dict(PowerCycleConfig,
                                    data.get('power_cycle')),
+            pump=_from_dict(PumpConfig, data.get('pump')),
         )
 
     def to_dict(self):
@@ -726,4 +967,21 @@ class SuperhotRequest:
         self.time.validate()
         self.solver.validate()
         self.power_cycle.validate()
+        self.pump.validate()
+
+        # Rules that span sections
+        if self.reservoir.inflow == 'prescribed':
+            if self.operating.control != 'flow':
+                raise ValueError(
+                    "inflow 'prescribed' requires operating.control "
+                    "'flow': without the Darcy model there is no "
+                    'inflow relation to solve a wellhead pressure '
+                    'against')
+            if not self.decline.feedzone_profile:
+                raise ValueError("inflow 'prescribed' requires "
+                                 'decline.feedzone_profile')
+        if (self.decline.mass_flow_profile
+                and self.operating.control != 'flow'):
+            raise ValueError("decline.mass_flow_profile requires "
+                             "operating.control 'flow'")
         return self

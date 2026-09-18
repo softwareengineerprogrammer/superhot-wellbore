@@ -28,7 +28,9 @@ import pytest
 from superhot_wellbore.power_cycle import (DEFAULT_POWER_PARAMS,
                                            _baumann_efficiency,
                                            _dipippo_outlet_enthalpy,
+                                           _flash_cycle, _merge_params,
                                            _two_stage_turbine,
+                                           dry_steam_specific_work,
                                            power_cycle_analysis)
 
 
@@ -629,3 +631,69 @@ class TestTurbineExitQualityWarning:
 
         r_warn, caught = _expand_saturated_vapor(1.0, pp_warn)
         assert r_warn['success']
+
+
+# ====================================================================
+# 8. DRY-STEAM SPECIFIC WORK
+# ====================================================================
+
+class TestDrySteamSpecificWork:
+    """
+    dry_steam_specific_work(P) is the gross work of 1 kg of saturated
+    steam expanded from P through _two_stage_turbine(). It exists so
+    that a caller can price the steam fraction of a two-phase wellhead
+    separately from its liquid; it must therefore agree with the flash
+    cycle when the flash cycle is fed pure saturated vapour at the
+    same pressure, grow with the inlet pressure over the range where
+    the extra pressure ratio outweighs the extra exhaust moisture, and
+    refuse pressures where saturated vapour does not exist.
+    """
+
+    def test_rises_with_pressure_then_peaks(self):
+        """
+        More inlet pressure, more work, up to a broad maximum.
+
+        Saturated steam expanded to 0.01 MPa gains work with inlet
+        pressure until the exhaust moisture penalty (Baumann) takes
+        over; with the default 0.85 dry efficiency the maximum sits
+        between 5 and 15 MPa (about 0.59 MJ/kg at 7-10 MPa), and the
+        work falls off towards the critical pressure.
+        """
+        pressures = np.array([0.5, 1.0, 2.0, 3.0, 5.0, 7.0])
+        work = np.array([dry_steam_specific_work(P) for P in pressures])
+        assert np.all(np.isfinite(work)), work
+        assert np.all(np.diff(work) > 0), f'not monotone: {work}'
+        assert 0.3 < work[0] < 0.5 and 0.5 < work[-1] < 0.7, \
+            f'plausible MJ/kg range: {work}'
+        peak = max(dry_steam_specific_work(P) for P in (5.0, 7.0, 10.0, 15.0))
+        assert dry_steam_specific_work(20.0) < peak, 'falls off above'
+        assert dry_steam_specific_work(22.0) < dry_steam_specific_work(20.0)
+
+    def test_nan_at_and_above_the_critical_pressure(self):
+        """No saturated vapour at or above P_crit, no work."""
+        for P in (22.064, 25.0, 30.0):
+            assert np.isnan(dry_steam_specific_work(P)), P
+
+    def test_nan_at_or_below_the_condenser_pressure(self):
+        """Nothing to expand at the condenser pressure."""
+        pp = _merge_params(None)
+        assert np.isnan(dry_steam_specific_work(pp['P_condenser_MPa']))
+        assert np.isnan(dry_steam_specific_work(0.0))
+        assert np.isnan(dry_steam_specific_work(float('nan')))
+        assert np.isnan(dry_steam_specific_work(None))
+
+    def test_equals_the_flash_cycle_on_saturated_vapour_at_1_MPa(self):
+        """Saturated vapour at P_flash flashes to itself: same work."""
+        pp = _merge_params(None)
+        h_g = CP.PropsSI('H', 'P', 1e6, 'Q', 1, 'Water')
+        r = _flash_cycle(10.0, h_g, 1.0, pp)
+        assert r['success'], r
+        assert dry_steam_specific_work(1.0) == pytest.approx(
+            r['power_MWe'] / 10.0, rel=1e-9), \
+            'specific work equals the flash cycle output per kg'
+
+    def test_honours_the_turbine_parameters(self):
+        """A lower dry efficiency and a higher condenser pressure cut work."""
+        base = dry_steam_specific_work(5.0)
+        assert dry_steam_specific_work(5.0, {'eta_turbine_dry': 0.7}) < base
+        assert dry_steam_specific_work(5.0, {'P_condenser_MPa': 0.05}) < base

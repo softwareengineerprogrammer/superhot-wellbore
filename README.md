@@ -120,6 +120,79 @@ solved state, configured through the request's `power_cycle` section; the
 GEOPHIRES *Superhot Power Cycle* surface plant (`Power Plant Type, 10`) uses it
 for electricity generation.
 
+#### Production pumping
+
+The core modules describe a self-flowing well. When a prescribed flow rate
+cannot be lifted to the surface by the reservoir pressure alone (a 200 °C
+reservoir at 5 km with an 8 MPa drawdown, for instance), the client adds a
+downhole production pump on top of the unmodified core
+(`superhot_wellbore.client.pump`):
+
+1. The unpumped march decides whether the well *self-flows*: it reaches the
+   surface **and** the wellhead pressure is at least
+   `pump.min_self_flow_whp_MPa` (or the caller's `pump.target_whp_MPa`).
+   A self-flowing well, two-phase or not, is returned exactly as before.
+2. Otherwise the pump intake is the shallowest depth on the unpumped profile
+   from which the column is single-phase liquid with
+   `P ≥ P_sat(T) + pump.npsh_margin_MPa` all the way down to the feedzone
+   (the march is upstream-independent, so the unpumped profile *is* the
+   lower segment).
+3. The pump raises the pressure by `dP` with `h₂ = h₁ + dP / (ρ₁ η)`, and the
+   upper segment is marched from the intake to the surface. `dP` is solved so
+   that the wellhead pressure meets `pump.target_whp_MPa`, or
+   `P_sat(T_intake) + npsh_margin` when no target is given (the stream then
+   stays liquid to the wellhead). Pump power per well is `ṁ dP / (ρ₁ η)`.
+4. The intake is compared with an ESP envelope (`pump.max_depth_m`,
+   `pump.max_intake_temperature_C`). Under `pump.envelope = 'flag'` (default)
+   a pump outside it is modelled and reported in `pump_flags`; under
+   `'enforce'` the timestep fails with the reason in its message.
+
+The `pump` request section (`PumpConfig`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `mode` | `auto` | `never` (fail as before), `auto` (pump only when not self-flowing), `always` |
+| `efficiency` | `0.80` | pump efficiency η |
+| `npsh_margin_MPa` | `0.3447` | intake margin above `P_sat(T)`; also sets the default pumped WHP |
+| `min_self_flow_whp_MPa` | `1.0` | self-flow floor on the unpumped wellhead pressure |
+| `max_depth_m` | `1500` | ESP setting-depth limit |
+| `max_intake_temperature_C` | `250` | ESP intake-temperature limit |
+| `envelope` | `flag` | `flag` or `enforce` |
+| `target_whp_MPa` | `None` | pumped wellhead pressure; `None` selects `P_sat(T_intake) + margin` |
+| `tolerance_MPa` | `0.01` | convergence tolerance on the pumped WHP |
+| `max_dP_MPa` | `60` | upper bound of the pump pressure rise |
+
+Every `TimestepResult` then carries `pumped`, `pump_depth_m`,
+`P_pump_intake_MPa`, `T_pump_intake_C`, `dP_pump_MPa`, `pump_power_MWe`,
+`self_flow_whp_MPa`, `self_flowing`, `wellhead_phase`, `wellhead_quality`,
+`dry_steam_work_MJkg` and `pump_flags` (a subset of
+`temperature_limit`, `depth_limit`, `self_flow_below_floor`,
+`two_phase_at_sandface`, `pump_outside_envelope`, `no_liquid_intake`); the
+wellhead values of a pumped timestep are those of the pumped upper segment.
+`power_cycle.dry_steam_specific_work(P)` is the gross specific turbine work of
+saturated steam expanded from `P` (the steam share of a two-phase wellhead
+stream). The pump stage applies to prescribed-flow solves only: a wellhead
+pressure solve (`operating.control = 'whp'`) finds the flow the well delivers
+by itself.
+
+In GEOPHIRES these map onto `Superhot Production Pump` (mode),
+`Superhot Production Pump Envelope`, `Superhot Production Pump Maximum Depth`,
+`Superhot Production Pump Maximum Intake Temperature` and
+`Superhot Minimum Self-Flow Wellhead Pressure`, with `Circulation Pump
+Efficiency` as the efficiency and `Production Wellhead Pressure` (when
+provided) as the target; GEOPHIRES prices the pumps through its own
+production-pump cost correlation from the reported pump power and depth.
+
+#### Prescribed inflow
+
+An external reservoir simulator can bypass the Darcy inflow model:
+`reservoir.inflow = 'prescribed'` (the transmissivity is then optional)
+with `decline.feedzone_profile = [[time_yr, P_feedzone_MPa, h_feedzone_MJkg],
+...]` and, optionally, `decline.mass_flow_profile = [[time_yr, kg/s], ...]`.
+Both tables are interpolated linearly in time and require
+`operating.control = 'flow'`; the wellbore and pump stage run unchanged from
+the tabulated sandface state.
+
 The client can also be driven directly from Python:
 
 ```python
