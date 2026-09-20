@@ -226,7 +226,12 @@ class TimestepResult:
                            'pump_depth_m', 'P_pump_intake_MPa',
                            'T_pump_intake_C', 'dP_pump_MPa',
                            'pump_power_MWe', 'self_flow_whp_MPa',
-                           'wellhead_quality', 'dry_steam_work_MJkg')
+                           'wellhead_quality')
+    # dry_steam_work_MJkg is NOT interpolated: it is a function of the
+    # wellhead pressure alone and is undefined at a supercritical
+    # wellhead, so interpolating it would spread that NaN into
+    # sub-critical timesteps. The client derives it per timestep from
+    # whp_MPa after interpolation.
 
     #: Flag fields copied from the nearest successful solve
     COPIED_FIELDS = ('cycle', 'choked', 'converged', 'pumped',

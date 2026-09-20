@@ -598,6 +598,17 @@ class SuperhotWellboreClient:
 
         timesteps = interpolate_timesteps(times, solved,
                                           pressures, temperatures)
+        # The dry-steam turbine work is a function of the wellhead
+        # pressure alone, and is undefined (NaN) at a supercritical
+        # wellhead. Interpolating it linearly spreads that NaN over
+        # every interpolated timestep between a supercritical solve
+        # and a sub-critical one, which leaves a sub-critical
+        # wellhead without the number its flash plant needs. Derive
+        # it from each timestep's own pressure instead.
+        power_params = self.request.power_cycle.to_params()
+        for ts in timesteps:
+            ts.dry_steam_work_MJkg = power_cycle.dry_steam_specific_work(
+                ts.whp_MPa, power_params)
 
         n_solved = len(indices)
         if n_solved < times.size:

@@ -51,6 +51,33 @@ def test_interpolated_values(synthetic_profile):
     assert interpolated.cycle == 'flash', 'cycle taken from nearest solve'
 
 
+def test_dry_steam_work_is_not_interpolated():
+    """A supercritical solve must not leave its neighbours without the work.
+
+    dry_steam_specific_work is undefined above the critical pressure, so
+    interpolating it linearly would spread that NaN into sub-critical
+    timesteps, where the flash plant needs the number. It is derived from
+    each timestep's own wellhead pressure instead (SuperhotClient), so the
+    interpolator must not carry a value at all.
+    """
+    from superhot_wellbore.client.results import TimestepResult
+
+    assert 'dry_steam_work_MJkg' not in TimestepResult.INTERPOLATED_FIELDS, \
+        'dry-steam work is derived, never interpolated'
+
+    supercritical = TimestepResult(
+        time_yr=0.0, solved=True, success=True, whp_MPa=30.0,
+        wellhead_phase='supercritical', dry_steam_work_MJkg=float('nan'))
+    vapour = TimestepResult(
+        time_yr=2.0, solved=True, success=True, whp_MPa=10.0,
+        wellhead_phase='single_phase_vapor', dry_steam_work_MJkg=0.59)
+    profile = interpolate_timesteps([0.0, 1.0, 2.0],
+                                    {0: supercritical, 2: vapour})
+    middle = profile[1]
+    assert middle.success and not middle.solved, 'the middle step is filled in'
+    assert np.isfinite(middle.whp_MPa), 'pressure still interpolates'
+
+
 def test_no_solves_means_no_success():
     """Without a single solve nothing is reported as usable."""
     empty = interpolate_timesteps([0.0, 1.0], {})
@@ -178,7 +205,7 @@ def test_pump_fields_are_interpolated():
     solved = {0: _pump_step(0.0),
               2: _pump_step(2.0, pump_depth_m=800.0, dP_pump_MPa=7.0,
                             pump_power_MWe=0.6, T_pump_intake_C=193.8,
-                            P_pump_intake_MPa=1.9, dry_steam_work_MJkg=0.52)}
+                            P_pump_intake_MPa=1.9)}
     filled = interpolate_timesteps([0.0, 1.0, 2.0], solved)
     middle = filled[1]
     assert not middle.solved and middle.success, 'interpolated step'
@@ -187,8 +214,9 @@ def test_pump_fields_are_interpolated():
     assert middle.pump_power_MWe == pytest.approx(0.5), 'pump power'
     assert middle.T_pump_intake_C == pytest.approx(192.8), 'intake T'
     assert middle.P_pump_intake_MPa == pytest.approx(1.8), 'intake P'
-    assert middle.dry_steam_work_MJkg == pytest.approx(0.51), 'dry steam'
     assert np.isnan(middle.self_flow_whp_MPa), 'NaN stays NaN'
+    # The dry-steam work is derived from whp_MPa per timestep, not interpolated:
+    # see test_dry_steam_work_is_not_interpolated.
 
 
 def test_pump_flags_are_copied_from_the_nearest_solve():

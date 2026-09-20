@@ -113,8 +113,13 @@ def test_hold_flow_solves_once_for_pressure_then_prescribes_flow(monkeypatch):
     monkeypatch.setattr(client_module.core, 'coupled_model',
                         fake_coupled_model)
     monkeypatch.setattr(client_module, 'power_cycle',
-                        type('PC', (), {'power_cycle_analysis':
-                                        staticmethod(lambda raw, params: None)}))
+                        type('PC', (), {
+                            'power_cycle_analysis':
+                                staticmethod(lambda raw, params: None),
+                            # The client derives the dry-steam work of every
+                            # timestep from its wellhead pressure.
+                            'dry_steam_specific_work':
+                                staticmethod(lambda whp, params=None: 0.5)}))
 
     request = SuperhotRequest.from_dict({
         'well': {'depth_m': 3500},
