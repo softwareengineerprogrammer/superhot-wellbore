@@ -196,13 +196,13 @@ the tabulated sandface state.
 The client can also be driven directly from Python:
 
 ```python
-from superhot_wellbore.client import SuperhotRequest, SuperhotWellboreClient
+from superhot_wellbore.client import CoupledWellboreRequest, CoupledWellboreClient
 
-request = SuperhotRequest.from_dict({
+request = CoupledWellboreRequest.from_dict({
     'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 450.0},
     'operating': {'target_whp_MPa': 10.0},
 })
-profile = SuperhotWellboreClient(request).solve_profile()
+profile = CoupledWellboreClient(request).solve_profile()
 print(profile.summary())
 ```
 

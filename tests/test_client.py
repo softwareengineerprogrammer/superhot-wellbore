@@ -17,8 +17,8 @@ Author: superhot-wellbore GEOPHIRES client
 import numpy as np
 import pytest
 
-from superhot_wellbore.client.client import SuperhotWellboreClient
-from superhot_wellbore.client.config import SuperhotRequest
+from superhot_wellbore.client.client import CoupledWellboreClient
+from superhot_wellbore.client.config import CoupledWellboreRequest
 
 
 # ====================================================================
@@ -27,7 +27,7 @@ from superhot_wellbore.client.config import SuperhotRequest
 
 def test_depth_derived_from_reservoir_pressure():
     """Without a depth, 30 MPa hydrostatic implies 3500 m."""
-    client = SuperhotWellboreClient(SuperhotRequest.from_dict(
+    client = CoupledWellboreClient(CoupledWellboreRequest.from_dict(
         {'reservoir': {'P_reservoir_MPa': 30.0}}))
     assert client.depth_m == pytest.approx(3500.0, abs=1e-9), \
         'derived from 30 MPa'
@@ -37,7 +37,7 @@ def test_depth_derived_from_reservoir_pressure():
 
 def test_depth_snapped_to_the_integration_step():
     """A depth off the grid is snapped up and reported."""
-    snapped = SuperhotWellboreClient(SuperhotRequest.from_dict(
+    snapped = CoupledWellboreClient(CoupledWellboreRequest.from_dict(
         {'well': {'depth_m': 2106, 'delta_z_m': 10}}))
     assert snapped.depth_m == pytest.approx(2110.0, abs=1e-9), \
         'snapped to the integration step'
@@ -52,7 +52,7 @@ def test_depth_snapped_to_the_integration_step():
 @pytest.mark.slow
 def test_coupled_solve_is_physically_ordered():
     """A real solve returns a usable, physically ordered profile."""
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'name': 'selftest',
         'reservoir': {'P_reservoir_MPa': 30.0,
                       'T_reservoir_C': 450.0,
@@ -61,7 +61,7 @@ def test_coupled_solve_is_physically_ordered():
         'time': {'plant_lifetime_yr': 2, 'timesteps_per_year': 2},
         'solver': {'max_solve_points': 2},
     })
-    profile = SuperhotWellboreClient(request).solve_profile()
+    profile = CoupledWellboreClient(request).solve_profile()
     first = profile.initial
 
     assert first is not None, 'a solution was found'
@@ -121,7 +121,7 @@ def test_hold_flow_solves_once_for_pressure_then_prescribes_flow(monkeypatch):
                             'dry_steam_specific_work':
                                 staticmethod(lambda whp, params=None: 0.5)}))
 
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'well': {'depth_m': 3500},
         'operating': {'control': 'whp', 'target_whp_MPa': 10.0,
                       'hold': 'flow'},
@@ -134,7 +134,7 @@ def test_hold_flow_solves_once_for_pressure_then_prescribes_flow(monkeypatch):
         # pumped route.
         'pump': {'mode': 'never'},
     })
-    profile = SuperhotWellboreClient(request).solve_profile()
+    profile = CoupledWellboreClient(request).solve_profile()
 
     assert [kind for kind, _ in calls] == ['whp', 'flow', 'flow'], \
         'one pressure solve, then prescribed-flow solves'
@@ -148,7 +148,7 @@ def test_hold_flow_solves_once_for_pressure_then_prescribes_flow(monkeypatch):
 
 def test_unknown_hold_mode_rejected():
     """An unknown hold mode is caught by validate()."""
-    request = SuperhotRequest.from_dict({'operating': {'hold': 'temperature'}})
+    request = CoupledWellboreRequest.from_dict({'operating': {'hold': 'temperature'}})
     with pytest.raises(ValueError):
         request.validate()
 
@@ -187,7 +187,7 @@ def test_prescribed_inflow_bypasses_the_darcy_model(monkeypatch):
     monkeypatch.setattr(client_module.pump_module, 'solve_pumped_state',
                         fake_solve_pumped_state)
 
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 220.0,
                       'inflow': 'prescribed', 'transmissivity_md_m': None},
         'well': {'depth_m': 3000},
@@ -197,7 +197,7 @@ def test_prescribed_inflow_bypasses_the_darcy_model(monkeypatch):
         'time': {'plant_lifetime_yr': 2, 'timesteps_per_year': 1},
         'solver': {'max_solve_points': 0},
     })
-    profile = SuperhotWellboreClient(request).solve_profile()
+    profile = CoupledWellboreClient(request).solve_profile()
 
     assert len(seen) == 2, 'one pump-stage solve per timestep'
     assert [call['P_fz_MPa'] for call in seen] == [22.0, 20.0], \
@@ -233,14 +233,14 @@ def test_mass_flow_profile_is_honoured_per_timestep(monkeypatch):
     monkeypatch.setattr(client_module.pump_module, 'solve_pumped_state',
                         fake_solve_pumped_state)
 
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 220.0},
         'well': {'depth_m': 3000},
         'operating': {'control': 'flow', 'mass_flow_kgs': 60.0},
         'decline': {'mass_flow_profile': [[0.0, 60.0], [4.0, 40.0]]},
         'solver': {'max_solve_points': 3},
     })
-    profile = SuperhotWellboreClient(request).solve_profile(
+    profile = CoupledWellboreClient(request).solve_profile(
         time_yr=[0.0, 1.0, 2.0, 3.0, 4.0])
 
     assert flows == pytest.approx([60.0, 50.0, 40.0]), \

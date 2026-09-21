@@ -30,15 +30,15 @@ Quick start
 In Python::
 
     from superhot_wellbore.client import (
-        SuperhotRequest, SuperhotWellboreClient)
+        CoupledWellboreRequest, CoupledWellboreClient)
 
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 450.0},
         'operating': {'target_whp_MPa': 10.0},
         'decline': {'temperature_mode': 'linear_percent',
                     'temperature_rate_per_year': 0.5},
     })
-    profile = SuperhotWellboreClient(request).solve_profile()
+    profile = CoupledWellboreClient(request).solve_profile()
     print(profile.summary())
 
 Pass the caller's own time vector to solve_profile(time_yr=...) to get
@@ -82,14 +82,14 @@ Author: superhot-wellbore client
 """
 
 from .. import __version__
-from .client import (SuperhotWellboreClient, solve_profile,
+from .client import (CoupledWellboreClient, solve_profile,
                      solve_steady_state)
 from .config import (CONTROL_MODES, DECLINE_MODES, HOLD_MODES,
                      INFLOW_MODES, PUMP_ENVELOPES, PUMP_MODES,
                      ROCK_TEMPERATURE_MODES, DeclineConfig,
                      OperatingConfig, PowerCycleConfig, PumpConfig,
                      ReservoirConfig, RockTemperatureConfig, SolverConfig,
-                     SuperhotRequest, TimeConfig, WellConfig)
+                     CoupledWellboreRequest, TimeConfig, WellConfig)
 from .export import (export_all, geophires_input_text,
                      write_geophires_input, write_profile_json,
                      write_request_json, write_temperature_profile)
@@ -101,11 +101,11 @@ from .results import (GEOPHIRES_RESERVOIR_MODEL_UPP,
 __all__ = [
     '__version__',
     # Client
-    'SuperhotWellboreClient',
+    'CoupledWellboreClient',
     'solve_profile',
     'solve_steady_state',
     # Configuration
-    'SuperhotRequest',
+    'CoupledWellboreRequest',
     'ReservoirConfig',
     'WellConfig',
     'RockTemperatureConfig',

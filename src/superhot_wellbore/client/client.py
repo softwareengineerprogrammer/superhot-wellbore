@@ -50,9 +50,9 @@ The client does three things the raw modules leave to the caller:
 Typical use::
 
     from superhot_wellbore.client import (
-        SuperhotRequest, SuperhotWellboreClient)
+        CoupledWellboreRequest, CoupledWellboreClient)
 
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'reservoir': {'P_reservoir_MPa': 30.0, 'T_reservoir_C': 450.0,
                       'transmissivity_md_m': 1000.0},
         'operating': {'control': 'whp', 'target_whp_MPa': 10.0},
@@ -60,7 +60,7 @@ Typical use::
                     'temperature_rate_per_year': 0.5},
         'time': {'plant_lifetime_yr': 30, 'timesteps_per_year': 4},
     })
-    profile = SuperhotWellboreClient(request).solve_profile()
+    profile = CoupledWellboreClient(request).solve_profile()
 
 Author: superhot-wellbore GEOPHIRES client
 """
@@ -74,7 +74,7 @@ from .. import reservoir as core
 from ..wellbore_physics import fluid_properties_Ph
 from . import pump as pump_module
 from . import results as results_module
-from .config import SuperhotRequest
+from .config import CoupledWellboreRequest
 from .results import (ProductionProfile, TimestepResult,
                       interpolate_timesteps)
 
@@ -102,19 +102,19 @@ def _is_finite(value):
 # CLIENT
 # ====================================================================
 
-class SuperhotWellboreClient:
+class CoupledWellboreClient:
     """
     Run the coupled superhot reservoir-wellbore model for GEOPHIRES.
 
     Parameters
     ----------
-    request : SuperhotRequest or dict or None
+    request : CoupledWellboreRequest or dict or None
         Scenario description. A dict is passed through
-        SuperhotRequest.from_dict(); None uses all defaults.
+        CoupledWellboreRequest.from_dict(); None uses all defaults.
 
     Attributes
     ----------
-    request : SuperhotRequest
+    request : CoupledWellboreRequest
         The validated scenario.
     notes : list of str
         Human-readable remarks collected while solving (depth
@@ -124,8 +124,8 @@ class SuperhotWellboreClient:
 
     def __init__(self, request=None):
         if isinstance(request, dict):
-            request = SuperhotRequest.from_dict(request)
-        self.request = (request or SuperhotRequest()).validate()
+            request = CoupledWellboreRequest.from_dict(request)
+        self.request = (request or CoupledWellboreRequest()).validate()
         self.notes = []
         self._depth_m = None
         self._rock_cache = {}
@@ -676,7 +676,7 @@ def solve_profile(request, time_yr=None):
 
     Parameters
     ----------
-    request : SuperhotRequest or dict
+    request : CoupledWellboreRequest or dict
         Scenario description.
     time_yr : sequence of float or None
         Optional explicit time vector [yr].
@@ -685,7 +685,7 @@ def solve_profile(request, time_yr=None):
     -------
     ProductionProfile
     """
-    return SuperhotWellboreClient(request).solve_profile(time_yr=time_yr)
+    return CoupledWellboreClient(request).solve_profile(time_yr=time_yr)
 
 
 def solve_steady_state(request):
@@ -694,14 +694,14 @@ def solve_steady_state(request):
 
     Parameters
     ----------
-    request : SuperhotRequest or dict
+    request : CoupledWellboreRequest or dict
         Scenario description.
 
     Returns
     -------
     TimestepResult
     """
-    return SuperhotWellboreClient(request).solve_steady_state()
+    return CoupledWellboreClient(request).solve_steady_state()
 
 
 # Re-exported so that callers can reach the result types through the

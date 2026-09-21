@@ -885,7 +885,7 @@ class PumpConfig:
 # ====================================================================
 
 @dataclass
-class SuperhotRequest:
+class CoupledWellboreRequest:
     """
     Complete description of a superhot single-well GEOPHIRES scenario.
 
@@ -894,7 +894,7 @@ class SuperhotRequest:
     tools such as GEOPHIRES.
     """
 
-    name: str = 'superhot'
+    name: str = 'well'
     reservoir: ReservoirConfig = field(default_factory=ReservoirConfig)
     well: WellConfig = field(default_factory=WellConfig)
     rock_temperature: RockTemperatureConfig = field(
@@ -928,7 +928,7 @@ class SuperhotRequest:
                              f'{", ".join(unknown)}. Valid sections: '
                              f'{", ".join(sorted(sections))}')
         return cls(
-            name=data.get('name', 'superhot'),
+            name=data.get('name', 'well'),
             reservoir=_from_dict(ReservoirConfig, data.get('reservoir')),
             well=_from_dict(WellConfig, data.get('well')),
             rock_temperature=_from_dict(RockTemperatureConfig,
@@ -956,7 +956,7 @@ class SuperhotRequest:
 
         Returns
         -------
-        SuperhotRequest
+        CoupledWellboreRequest
             self, so that validation can be chained.
         """
         self.reservoir.validate()

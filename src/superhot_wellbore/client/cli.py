@@ -27,8 +27,8 @@ import os
 import sys
 
 from . import export
-from .client import SuperhotWellboreClient
-from .config import SuperhotRequest
+from .client import CoupledWellboreClient
+from .config import CoupledWellboreRequest
 from .results import PROFILE_TEMPERATURES
 
 DEFAULT_OUTPUT_DIRECTORY = 'superhot_geophires'
@@ -41,11 +41,11 @@ DEFAULT_OUTPUT_DIRECTORY = 'superhot_geophires'
 def _load_request(path):
     """Load a request from a JSON file, or from stdin when path is -."""
     if path is None:
-        return SuperhotRequest()
+        return CoupledWellboreRequest()
     if path == '-':
-        return SuperhotRequest.from_dict(json.load(sys.stdin))
+        return CoupledWellboreRequest.from_dict(json.load(sys.stdin))
     with open(path, encoding='utf-8') as handle:
-        return SuperhotRequest.from_dict(json.load(handle))
+        return CoupledWellboreRequest.from_dict(json.load(handle))
 
 
 def _parse_value(text):
@@ -108,7 +108,7 @@ def _build_request(arguments):
 
 def command_template(arguments):
     """Print or write an example request."""
-    example = SuperhotRequest.from_dict({
+    example = CoupledWellboreRequest.from_dict({
         'name': 'superhot_example',
         'reservoir': {
             'P_reservoir_MPa': 30.0,
@@ -145,7 +145,7 @@ def command_template(arguments):
 def command_run(arguments):
     """Solve a production history and write the GEOPHIRES files."""
     request = _build_request(arguments)
-    client = SuperhotWellboreClient(request)
+    client = CoupledWellboreClient(request)
 
     print(f'Solving "{request.name}": '
           f'P_res = {request.reservoir.P_reservoir_MPa:g} MPa, '
@@ -183,7 +183,7 @@ def command_run(arguments):
 def command_steady(arguments):
     """Solve the initial steady state only."""
     request = _build_request(arguments)
-    client = SuperhotWellboreClient(request)
+    client = CoupledWellboreClient(request)
     result = client.solve_steady_state()
     print(json.dumps(result.to_dict(), indent=2))
     return 0 if result.success else 1

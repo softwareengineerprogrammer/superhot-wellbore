@@ -27,8 +27,8 @@ import pytest
 from superhot_wellbore import reservoir as core
 from superhot_wellbore.client import client as client_module
 from superhot_wellbore.client import pump as pump_module
-from superhot_wellbore.client.client import SuperhotWellboreClient
-from superhot_wellbore.client.config import PumpConfig, SuperhotRequest
+from superhot_wellbore.client.client import CoupledWellboreClient
+from superhot_wellbore.client.config import PumpConfig, CoupledWellboreRequest
 from superhot_wellbore.client.pump import (PUMP_FLAGS,
                                            saturation_pressure_MPa,
                                            solve_pumped_state,
@@ -440,13 +440,13 @@ def test_client_routes_held_flow_through_the_pump_stage(monkeypatch):
     monkeypatch.setattr(client_module.core, 'coupled_model',
                         lambda **kwargs: pytest.fail('coupled_model called'))
 
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'reservoir': {'P_reservoir_MPa': 49.0, 'T_reservoir_C': 200.0},
         'well': {'depth_m': 5120},
         'operating': {'control': 'flow', 'mass_flow_kgs': 60.0},
         'pump': {'mode': 'auto', 'max_depth_m': 1500.0},
     })
-    result = SuperhotWellboreClient(request).solve_steady_state()
+    result = CoupledWellboreClient(request).solve_steady_state()
 
     assert len(seen) == 1, 'one pump-stage solve'
     call = seen[0]
@@ -480,13 +480,13 @@ def test_client_reports_an_enforced_failure_message(monkeypatch):
                           'message': 'production pump required outside '
                                      'the envelope: intake depth 1610 m '
                                      'exceeds the maximum 1500 m'})
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'reservoir': {'T_reservoir_C': 200.0}, 'well': {'depth_m': 5000},
         'operating': {'control': 'flow', 'mass_flow_kgs': 60.0},
         'pump': {'envelope': 'enforce'},
         'solver': {'strict': True},
     })
-    client = SuperhotWellboreClient(request)
+    client = CoupledWellboreClient(request)
     result = client.solve_steady_state()
     assert not result.success and result.pumped, 'failure with the pump'
     assert 'exceeds the maximum 1500 m' in result.message, result.message
@@ -508,7 +508,7 @@ def _catf_request(T_C, depth_m, P_res_MPa, PI_kg_s_bar=0.7482,
     kb_m3 = ((PI_kg_s_bar / 1e5) * mu
              * math.log(drainage_radius_m / (diameter_m / 2))
              / (2.0 * math.pi * rho))
-    return SuperhotRequest.from_dict({
+    return CoupledWellboreRequest.from_dict({
         'reservoir': {'P_reservoir_MPa': P_res_MPa, 'T_reservoir_C': T_C,
                       'transmissivity_md_m': kb_m3 / 9.869233e-16,
                       'drainage_radius_m': drainage_radius_m},
@@ -525,7 +525,7 @@ def _catf_request(T_C, depth_m, P_res_MPa, PI_kg_s_bar=0.7482,
 def test_foak_200C_well_is_pumped():
     """CATF FOAK 200 C at 5120 m (49.3 MPa): dies unpumped, pumped ORC feed."""
     request = _catf_request(200.0, 5120, 49.3)
-    result, raw = SuperhotWellboreClient(request).solve_state(49.3, 200.0)
+    result, raw = CoupledWellboreClient(request).solve_state(49.3, 200.0)
     assert result.success, result.message
     assert result.pumped and not result.self_flowing, 'pumped'
     assert np.isnan(result.self_flow_whp_MPa), \
@@ -553,7 +553,7 @@ def test_foak_200C_well_is_pumped():
 def test_foak_250C_well_self_flows_two_phase():
     """CATF FOAK 250 C at 6490 m (61.4 MPa): self-flows ~1.8 MPa two-phase."""
     request = _catf_request(250.0, 6490, 61.4)
-    result, raw = SuperhotWellboreClient(request).solve_state(61.4, 250.0)
+    result, raw = CoupledWellboreClient(request).solve_state(61.4, 250.0)
     assert result.success, result.message
     assert result.self_flowing and not result.pumped, 'self-flowing'
     assert result.whp_MPa == pytest.approx(1.8, abs=0.3), \
@@ -577,7 +577,7 @@ def test_shr4_state_is_unchanged_by_the_pump_stage():
         'well': {'depth_m': 3500},
         'operating': {'control': 'flow', 'mass_flow_kgs': 60.0},
     }
-    client = SuperhotWellboreClient(SuperhotRequest.from_dict(base))
+    client = CoupledWellboreClient(CoupledWellboreRequest.from_dict(base))
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
         reference = core.coupled_model(
@@ -591,7 +591,7 @@ def test_shr4_state_is_unchanged_by_the_pump_stage():
         assert raw[key] == value, f'{key}: {raw[key]!r} != {value!r}'
     assert raw['wellhead_phase'] == 'single_phase_vapor', \
         raw['wellhead_phase']
-    never = SuperhotWellboreClient(SuperhotRequest.from_dict(
+    never = CoupledWellboreClient(CoupledWellboreRequest.from_dict(
         dict(base, pump={'mode': 'never'})))
     result_never, raw_never = never.solve_state(30.0, 450.0)
     assert raw_never == reference, "mode 'never' is coupled_model itself"

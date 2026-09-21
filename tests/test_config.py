@@ -20,7 +20,7 @@ import pytest
 
 from superhot_wellbore.client.config import (DeclineConfig, PumpConfig,
                                                        ReservoirConfig,
-                                                       SuperhotRequest,
+                                                       CoupledWellboreRequest,
                                                        TimeConfig, WellConfig)
 
 
@@ -30,12 +30,12 @@ from superhot_wellbore.client.config import (DeclineConfig, PumpConfig,
 
 def test_json_round_trip():
     """A request survives serialisation and reconstruction."""
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'name': 'roundtrip',
         'reservoir': {'T_reservoir_C': 500.0},
         'operating': {'control': 'flow', 'mass_flow_kgs': 40.0},
     })
-    restored = SuperhotRequest.from_dict(
+    restored = CoupledWellboreRequest.from_dict(
         json.loads(json.dumps(request.to_dict())))
     assert restored == request, 'JSON round trip'
     assert restored.reservoir.T_reservoir_C == pytest.approx(500.0,
@@ -45,7 +45,7 @@ def test_json_round_trip():
 
 def test_power_cycle_section_round_trip():
     """Power cycle parameters travel with the request and reach params."""
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'power_cycle': {'T_ambient_C': 10.0, 'P_flash_MPa': 0.8},
     })
     params = request.validate().power_cycle.to_params()
@@ -55,14 +55,14 @@ def test_power_cycle_section_round_trip():
         'flash pressure passed through'
     assert params['eta_turbine_dry'] == pytest.approx(0.85, abs=1e-9), \
         'defaults fill the rest'
-    restored = SuperhotRequest.from_dict(
+    restored = CoupledWellboreRequest.from_dict(
         json.loads(json.dumps(request.to_dict())))
     assert restored == request, 'JSON round trip with power cycle'
 
 
 def test_invalid_power_cycle_rejected():
     """A rejection temperature below the working fluid inlet is caught."""
-    request = SuperhotRequest.from_dict(
+    request = CoupledWellboreRequest.from_dict(
         {'power_cycle': {'T_reject_C': 30.0, 'T_wf_inlet_C': 40.0}})
     with pytest.raises(ValueError):
         request.validate()
@@ -70,7 +70,7 @@ def test_invalid_power_cycle_rejected():
 
 def test_pump_section_round_trip():
     """Pump parameters travel with the request and validate."""
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'pump': {'mode': 'always', 'efficiency': 0.75,
                  'max_depth_m': 1200.0, 'envelope': 'enforce',
                  'target_whp_MPa': 2.0},
@@ -81,9 +81,9 @@ def test_pump_section_round_trip():
     assert pump.efficiency == pytest.approx(0.75, abs=1e-9), 'efficiency'
     assert pump.npsh_margin_MPa == pytest.approx(0.3447, abs=1e-9), \
         'defaults fill the rest'
-    assert SuperhotRequest().pump == PumpConfig(), \
+    assert CoupledWellboreRequest().pump == PumpConfig(), \
         'a request without a pump section gets the default pump'
-    restored = SuperhotRequest.from_dict(
+    restored = CoupledWellboreRequest.from_dict(
         json.loads(json.dumps(request.to_dict())))
     assert restored == request, 'JSON round trip with pump'
     assert 'pump' in request.to_dict(), 'the section is serialised'
@@ -92,7 +92,7 @@ def test_pump_section_round_trip():
 def test_unknown_pump_key_rejected():
     """A misspelled pump key is an error."""
     with pytest.raises(ValueError):
-        SuperhotRequest.from_dict({'pump': {'max_depth': 1500}})
+        CoupledWellboreRequest.from_dict({'pump': {'max_depth': 1500}})
 
 
 @pytest.mark.parametrize('bad', [
@@ -109,14 +109,14 @@ def test_unknown_pump_key_rejected():
 ])
 def test_invalid_pump_section_rejected(bad):
     """Unknown modes and non-positive limits are caught by validate()."""
-    request = SuperhotRequest.from_dict({'pump': bad})
+    request = CoupledWellboreRequest.from_dict({'pump': bad})
     with pytest.raises(ValueError):
         request.validate()
 
 
 def test_prescribed_inflow_needs_flow_control():
     """Prescribed inflow with a WHP solve is contradictory."""
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'reservoir': {'inflow': 'prescribed'},
         'operating': {'control': 'whp', 'target_whp_MPa': 5.0},
         'decline': {'feedzone_profile': [[0.0, 20.0, 0.9]]},
@@ -127,7 +127,7 @@ def test_prescribed_inflow_needs_flow_control():
 
 def test_prescribed_inflow_needs_a_feedzone_profile():
     """Prescribed inflow without a table has no feedzone state."""
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'reservoir': {'inflow': 'prescribed'},
         'operating': {'control': 'flow', 'mass_flow_kgs': 60.0},
     })
@@ -149,7 +149,7 @@ def test_prescribed_inflow_makes_transmissivity_optional():
 
 def test_mass_flow_profile_needs_flow_control():
     """A tabulated flow rate cannot be combined with a WHP solve."""
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'operating': {'control': 'whp'},
         'decline': {'mass_flow_profile': [[0.0, 60.0], [10.0, 50.0]]},
     })
@@ -160,25 +160,25 @@ def test_mass_flow_profile_needs_flow_control():
 def test_unknown_section_rejected():
     """A misspelled section is an error, not a no-op."""
     with pytest.raises(ValueError):
-        SuperhotRequest.from_dict({'reservior': {}})
+        CoupledWellboreRequest.from_dict({'reservior': {}})
 
 
 def test_unknown_key_rejected():
     """A misspelled key is an error, not a silently ignored value."""
     with pytest.raises(ValueError):
-        SuperhotRequest.from_dict({'reservoir': {'T_res': 500}})
+        CoupledWellboreRequest.from_dict({'reservoir': {'T_res': 500}})
 
 
 def test_control_flow_needs_a_flow_rate():
     """Flow control without a flow rate is caught by validate()."""
-    request = SuperhotRequest.from_dict({'operating': {'control': 'flow'}})
+    request = CoupledWellboreRequest.from_dict({'operating': {'control': 'flow'}})
     with pytest.raises(ValueError):
         request.validate()
 
 
 def test_unknown_rock_temperature_mode_rejected():
     """An unknown rock temperature mode is caught by validate()."""
-    request = SuperhotRequest.from_dict({'rock_temperature': {'mode': 'bpd'}})
+    request = CoupledWellboreRequest.from_dict({'rock_temperature': {'mode': 'bpd'}})
     with pytest.raises(ValueError):
         request.validate()
 

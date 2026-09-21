@@ -102,7 +102,7 @@ def write_temperature_profile(profile, path,
     Parameters
     ----------
     profile : ProductionProfile
-        Result of SuperhotWellboreClient.solve_profile().
+        Result of CoupledWellboreClient.solve_profile().
     path : str
         Destination file.
     profile_temperature : str
@@ -146,7 +146,7 @@ def geophires_input_text(profile, reservoir_output_file,
     Parameters
     ----------
     profile : ProductionProfile
-        Result of SuperhotWellboreClient.solve_profile().
+        Result of CoupledWellboreClient.solve_profile().
     reservoir_output_file : str
         Value for 'Reservoir Output File Name'. GEOPHIRES resolves it
         relative to its own working directory, so a bare file name
@@ -170,7 +170,7 @@ def geophires_input_text(profile, reservoir_output_file,
     parameters['Reservoir Output File Name'] = reservoir_output_file
 
     summary = profile.summary()
-    name = summary.get('name') or 'superhot'
+    name = summary.get('name') or 'well'
 
     lines = [
         '# ==================================================='
@@ -283,7 +283,7 @@ def export_all(profile, output_directory, name=None,
     Parameters
     ----------
     profile : ProductionProfile
-        Result of SuperhotWellboreClient.solve_profile().
+        Result of CoupledWellboreClient.solve_profile().
     output_directory : str
         Directory to write into; created if missing.
     name : str or None
@@ -299,7 +299,7 @@ def export_all(profile, output_directory, name=None,
         Keys 'temperature_profile', 'geophires_input' and
         'profile_json', each holding the path written.
     """
-    stem = name or getattr(profile.request, 'name', None) or 'superhot'
+    stem = name or getattr(profile.request, 'name', None) or 'well'
     os.makedirs(output_directory, exist_ok=True)
 
     profile_name = f'{stem}_reservoir_temperature.csv'

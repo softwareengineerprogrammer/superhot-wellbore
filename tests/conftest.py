@@ -14,7 +14,7 @@ Author: superhot-wellbore GEOPHIRES client
 
 import pytest
 
-from superhot_wellbore.client.config import SuperhotRequest
+from superhot_wellbore.client.config import CoupledWellboreRequest
 from superhot_wellbore.client.results import (ProductionProfile,
                                                         TimestepResult,
                                                         interpolate_timesteps)
@@ -23,7 +23,7 @@ from superhot_wellbore.client.results import (ProductionProfile,
 @pytest.fixture
 def synthetic_profile():
     """Build a profile without running the physics."""
-    request = SuperhotRequest.from_dict({
+    request = CoupledWellboreRequest.from_dict({
         'name': 'synthetic',
         'reservoir': {'P_reservoir_MPa': 30.0,
                       'T_reservoir_C': 450.0},
