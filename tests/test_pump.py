@@ -368,6 +368,38 @@ def test_envelope_enforced_fails_and_names_the_limit(analytic_march):
     assert len(analytic_march.calls) == 1, 'no segment march was run'
 
 
+def test_envelope_omit_leaves_a_self_flowing_well_unpumped(analytic_march):
+    """Under 'omit' a pump outside the envelope is not installed when
+    the well reaches the surface on its own; the flags say why."""
+    # 28 MPa at the feedzone reaches the surface at about 1.5 MPa on the
+    # analytic column: below a 2 MPa floor, so a pump is wanted, and its
+    # 190 C liquid intake is hotter than the 150 C limit.
+    raw = _solve(28.0, PumpConfig(mode='auto', envelope='omit',
+                                  min_self_flow_whp_MPa=2.0,
+                                  max_intake_temperature_C=150.0))
+    assert raw['success'] and not raw['pumped'], 'self-flowing, unpumped'
+    assert raw['pump_depth_m'] == 0.0 and raw['pump_power_MWe'] == 0.0
+    assert 0.0 < raw['whp_MPa'] < 2.0, 'the unpumped wellhead, below the floor'
+    assert raw['whp_MPa'] == raw['self_flow_whp_MPa']
+    assert not raw['self_flowing'], 'the floor is not met'
+    for flag in ('self_flow_below_floor', 'temperature_limit',
+                 'pump_outside_envelope'):
+        assert flag in raw['pump_flags'], f'{flag} in {raw["pump_flags"]}'
+    assert 'message' not in raw or not raw['message'], 'no failure message'
+    assert len(analytic_march.calls) == 1, 'no segment march was run'
+
+
+def test_envelope_omit_fails_a_well_that_does_not_reach_the_surface(analytic_march):
+    """Under 'omit' a well that needs the pump to reach the surface
+    still fails when that pump is outside the envelope."""
+    raw = _solve(P_DIES, PumpConfig(mode='auto', envelope='omit',
+                                    max_intake_temperature_C=150.0))
+    assert not raw['success'] and raw['pumped'], 'failed, pump required'
+    assert 'temperature_limit' in raw['pump_flags'], raw['pump_flags']
+    assert 'intake temperature' in raw['message'], raw['message']
+    assert np.isnan(raw['whp_MPa']), 'no wellhead state'
+
+
 def test_inside_the_envelope_nothing_is_flagged(analytic_march):
     """A pump within the limits carries no flags."""
     raw = _solve(P_DIES, PumpConfig(mode='auto', envelope='enforce'))

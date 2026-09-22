@@ -42,7 +42,10 @@ The intake depth and temperature are compared with an ESP envelope
 (maximum setting depth, maximum intake temperature). Under the 'flag'
 policy a pump outside the envelope is modelled and reported in
 pump_flags; under 'enforce' the solve fails with the reason in the
-message, so that a study never silently swaps its physics.
+message, so that a study never silently swaps its physics; under
+'omit' no such pump is installed and the well is left self-flowing
+(below the floor, flags kept) when the unpumped march reaches the
+surface, failing only when it does not.
 
 The returned dict has the shape of reservoir.coupled_model()'s so
 that the client and power_cycle.power_cycle_analysis() accept it
@@ -231,6 +234,18 @@ def _find_intake(profiles, npsh_margin_MPa):
 # ====================================================================
 # RESULT ASSEMBLY
 # ====================================================================
+
+def _pump_is_required(pump_cfg, reached):
+    """
+    Whether an inadmissible pump (outside the envelope, or without a
+    liquid intake) fails the solve: always under 'enforce', and under
+    'omit' only when the unpumped march did not reach the surface, so
+    that the well cannot be left self-flowing instead.
+    """
+    if pump_cfg.envelope == 'enforce':
+        return True
+    return pump_cfg.envelope == 'omit' and not reached
+
 
 def _fail_dict(mdot, choked=False):
     """The failure dict of reservoir.coupled_model(), plus pump keys."""
@@ -480,7 +495,7 @@ def solve_pumped_state(P_fz_MPa, h_fz_Jkg, mdot, rock_temperatures,
     flags.extend(intake_flags)
     if index is None:
         result['pump_flags'] = list(flags)
-        if pump_cfg.envelope == 'enforce':
+        if _pump_is_required(pump_cfg, reached):
             result['success'] = False
             result['message'] = (
                 f'no liquid pump intake: the column is not single-phase '
@@ -501,7 +516,13 @@ def solve_pumped_state(P_fz_MPa, h_fz_Jkg, mdot, rock_temperatures,
                           f'maximum {pump_cfg.max_intake_temperature_C:g} C')
     if violations:
         flags.append('pump_outside_envelope')
-        if pump_cfg.envelope == 'enforce':
+        if pump_cfg.envelope == 'omit' and reached:
+            # The well reaches the surface on its own: leave it
+            # self-flowing below the floor rather than install a pump
+            # outside the envelope; the flags say why.
+            result['pump_flags'] = list(flags)
+            return result
+        if _pump_is_required(pump_cfg, reached):
             result.update({
                 'success': False, 'pumped': True,
                 'pump_depth_m': float(z_p),

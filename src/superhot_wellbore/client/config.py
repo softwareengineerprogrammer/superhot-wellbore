@@ -98,7 +98,7 @@ INFLOW_MODES = ('darcy', 'prescribed')
 PUMP_MODES = ('never', 'auto', 'always')
 
 # Pump envelope policies recognised by PumpConfig
-PUMP_ENVELOPES = ('flag', 'enforce')
+PUMP_ENVELOPES = ('flag', 'enforce', 'omit')
 
 # NPSH margin GEOPHIRES keeps between the pump intake pressure and the
 # vapour pressure of the produced water, in MPa (WellBores.py: 344.7 kPa)
@@ -834,6 +834,11 @@ class PumpConfig:
                     pump_flags
         'enforce' - fail the solve when the pump is needed outside
                     the envelope or when no liquid intake exists
+        'omit'    - install no pump outside the envelope (or without
+                    a liquid intake): the well is left self-flowing,
+                    below min_self_flow_whp_MPa, when the unpumped
+                    march reaches the surface, with the condition in
+                    pump_flags; the solve fails only when it does not
     target_whp_MPa : float or None
         Pumped wellhead pressure [MPa]. None selects the vapour
         pressure at the intake temperature plus npsh_margin_MPa.
