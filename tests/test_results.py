@@ -139,30 +139,98 @@ def test_unknown_profile_temperature_rejected(synthetic_profile):
         synthetic_profile.temperature_profile_rows('bottomhole')
 
 
-def test_failed_solve_is_interpolated_and_flagged():
-    """A failed solve between good ones is filled in, but still visible."""
+def _good_step(t, **overrides):
+    """A successful self-flowing solved timestep."""
     from superhot_wellbore.client.results import TimestepResult
 
-    times = [0.0, 1.0, 2.0]
-    good = dict(mass_flow_kgs=70.0, whp_MPa=10.0, T_wellhead_C=300.0,
-                h_wellhead_MJkg=2.7, T_feedzone_C=390.0,
-                h_feedzone_MJkg=2.8, P_bh_MPa=18.0, dP_reservoir_MPa=12.0,
-                power_MWe=30.0, converged=True, success=True, solved=True)
+    values = dict(mass_flow_kgs=70.0, whp_MPa=10.0, T_wellhead_C=300.0,
+                  h_wellhead_MJkg=2.7, T_feedzone_C=390.0,
+                  h_feedzone_MJkg=2.8, P_bh_MPa=18.0, dP_reservoir_MPa=12.0,
+                  power_MWe=30.0, pumped=False, self_flowing=True,
+                  converged=True, success=True, solved=True)
+    values.update(overrides)
+    return TimestepResult(time_yr=t, **values)
+
+
+def test_failed_solve_keeps_its_failure():
+    """A failed solve late in the history stays failed and is never rebuilt.
+
+    A well that stops delivering, or a pump outside its envelope, at the
+    end of the profile must reach the caller as such: GEOPHIRES keys on
+    success and pump_flags, so masking the failure with the neighbouring
+    good state would report a well that kept flowing.
+    """
+    from superhot_wellbore.client.results import (ProductionProfile,
+                                                  TimestepResult)
+
+    times = [float(t) for t in range(31)]
+    last_good = dict(mass_flow_kgs=60.0, whp_MPa=8.0, T_wellhead_C=290.0,
+                     P_bh_MPa=16.0, dP_reservoir_MPa=14.0, power_MWe=25.0)
     solved = {
-        0: TimestepResult(time_yr=0.0, **good),
-        1: TimestepResult(time_yr=1.0, solved=True, success=False,
-                          message='did not reach the surface'),
-        2: TimestepResult(time_yr=2.0, **dict(good, mass_flow_kgs=60.0)),
+        0: _good_step(0.0),
+        15: _good_step(15.0, **last_good),
+        30: TimestepResult(time_yr=30.0, solved=True, success=False,
+                           pumped=True, self_flowing=False,
+                           pump_depth_m=1800.0,
+                           message='coupled model failed at this state',
+                           pump_flags=['pump_outside_envelope']),
     }
     filled = interpolate_timesteps(times, solved)
 
-    failed = filled[1]
-    assert failed.success and failed.solved, 'failed solve becomes usable'
-    assert failed.mass_flow_kgs == pytest.approx(65.0, abs=1e-9), \
-        'failed solve interpolated between neighbours'
-    assert 'did not reach the surface' in failed.message, \
-        'original failure stays visible'
-    assert all(ts.success for ts in filled), 'every timestep is usable'
+    failed = filled[30]
+    assert failed is solved[30], 'the failed solve is returned as solved'
+    assert failed.solved and not failed.success, 'failure preserved'
+    assert failed.message == 'coupled model failed at this state', \
+        'its own message'
+    assert failed.pump_flags == ['pump_outside_envelope'], 'its own flags'
+    assert failed.pumped and not failed.self_flowing, 'its own pump state'
+    assert failed.pump_depth_m == pytest.approx(1800.0), 'its own depth'
+    assert np.isnan(failed.mass_flow_kgs), 'no flow rate invented'
+    assert not failed.interpolated_across_failure, 'a solve is not filled in'
+
+    held = filled[29]
+    assert held.success and not held.solved, 'filled-in step stays usable'
+    assert held.interpolated_across_failure, 'nearest solve failed'
+    assert 't = 30.00 yr' in held.message, 'the failed solve is named'
+    for attribute in TimestepResult.INTERPOLATED_FIELDS:
+        expected = getattr(solved[15], attribute)
+        actual = getattr(held, attribute)
+        if np.isnan(expected):
+            assert np.isnan(actual), f'{attribute} stays NaN'
+        else:
+            assert actual == pytest.approx(expected), \
+                f'{attribute} flat-held from the last good solve'
+    assert held.pump_flags == [] and not held.pumped and held.self_flowing, \
+        'flags follow the nearest successful solve, not the failure'
+
+    early = filled[7]
+    assert not early.interpolated_across_failure, 'nearest solve succeeded'
+    assert early.message == 'interpolated between coupled-model solves', \
+        'plain interpolation message'
+    assert early.mass_flow_kgs == pytest.approx(70.0 - 10.0 * 7.0 / 15.0), \
+        'interpolated between the two good solves'
+    assert not any(ts.interpolated_across_failure for ts in filled[:23]), \
+        'steps nearer to t = 15 than to t = 30 are plain interpolations'
+    assert all(ts.interpolated_across_failure for ts in filled[23:30]), \
+        'steps nearer to the failed solve carry the marker'
+
+    profile = ProductionProfile(depth_m=3500.0, timesteps=filled)
+    assert profile.n_failed == 1, 'the failure is counted'
+    assert profile.n_solved == 3, 'the failure still counts as a solve'
+    assert not profile.any_pumped, 'the failed pumped solve is not usable'
+    assert profile.summary()['pump_flags'] == [], \
+        'flags of the failed solve are not reported as usable'
+
+
+def test_interpolated_across_failure_is_a_plain_field():
+    """The marker is never interpolated or copied from a neighbour."""
+    from superhot_wellbore.client.results import TimestepResult
+
+    assert 'interpolated_across_failure' not in \
+        TimestepResult.INTERPOLATED_FIELDS, 'not interpolated'
+    assert 'interpolated_across_failure' not in \
+        TimestepResult.COPIED_FIELDS, 'not copied'
+    assert TimestepResult().interpolated_across_failure is False, 'default'
 
 
 def test_failed_solve_without_any_success_stays_failed():
@@ -170,11 +238,71 @@ def test_failed_solve_without_any_success_stays_failed():
     from superhot_wellbore.client.results import TimestepResult
 
     solved = {0: TimestepResult(time_yr=0.0, solved=True, success=False,
-                                message='boom')}
+                                message='boom', pumped=True,
+                                pump_flags=['no_liquid_intake'])}
     filled = interpolate_timesteps([0.0, 1.0], solved)
     assert not filled[0].success and filled[0].message == 'boom', \
         'failure preserved'
+    assert filled[0].pumped and filled[0].pump_flags == ['no_liquid_intake'], \
+        'the failure keeps its own pump state and flags'
     assert not filled[1].success, 'unsolved step has nothing to use'
+    assert not filled[1].interpolated_across_failure, \
+        'nothing was interpolated, so nothing was carried across'
+
+
+# ====================================================================
+# CHOKED PRESCRIBED-FLOW SOLVES
+# ====================================================================
+
+def test_choked_prescribed_flow_solve_is_flagged(monkeypatch):
+    """A choked march under prescribed flow raises 'choked_flow'.
+
+    The core returns success=True with choked=True; the wellhead values
+    above the choke point are then approximate. Under control='flow' the
+    client says so on the per-timestep flag channel that GEOPHIRES
+    surfaces and can enforce; a wellhead pressure solve is not flagged.
+    """
+    from superhot_wellbore.client import PUMP_FLAGS
+    from superhot_wellbore.client import client as client_module
+    from superhot_wellbore.client.config import CoupledWellboreRequest
+
+    choked = {'success': True, 'mass_flow_kgs': 60.0, 'whp_MPa': 12.0,
+              'T_surface_C': 320.0, 'h_surface_MJkg': 2.7,
+              'T_feedzone_C': 400.0, 'h_feedzone_MJkg': 2.8,
+              'P_bh_MPa': 20.0, 'dP_reservoir_MPa': 10.0, 'choked': True}
+    monkeypatch.setattr(client_module.core, 'coupled_model',
+                        lambda **kwargs: dict(choked))
+    monkeypatch.setattr(client_module.core, 'solve_flow_for_whp',
+                        lambda **kwargs: dict(choked, converged=True))
+    monkeypatch.setattr(client_module, 'power_cycle',
+                        type('PC', (), {
+                            'power_cycle_analysis':
+                                staticmethod(lambda raw, params: None),
+                            'dry_steam_specific_work':
+                                staticmethod(lambda whp, params=None: 0.5)}))
+
+    def solve(control):
+        request = CoupledWellboreRequest.from_dict({
+            'well': {'depth_m': 3500},
+            'operating': {'control': control, 'target_whp_MPa': 10.0,
+                          'mass_flow_kgs': 60.0},
+            'pump': {'mode': 'never'},
+        })
+        result, _ = client_module.CoupledWellboreClient(request).solve_state(
+            30.0, 450.0)
+        return result
+
+    assert 'choked_flow' in PUMP_FLAGS, 'a known flag'
+
+    flow = solve('flow')
+    assert flow.success and flow.choked, 'a usable, choked solve'
+    assert 'choked_flow' in flow.pump_flags, 'flagged under prescribed flow'
+    assert 'choke limited' in flow.message, 'the message still says why'
+
+    whp = solve('whp')
+    assert whp.success and whp.choked, 'a usable, choked solve'
+    assert 'choked_flow' not in whp.pump_flags, \
+        'a wellhead pressure solve is not flagged'
 
 
 # ====================================================================

@@ -82,6 +82,7 @@ Author: superhot-wellbore client
 """
 
 from .. import __version__
+from ..power_cycle import is_dense_supercritical
 from .client import (CoupledWellboreClient, solve_profile,
                      solve_steady_state)
 from .config import (CONTROL_MODES, DECLINE_MODES, HOLD_MODES,
@@ -126,6 +127,8 @@ __all__ = [
     'solve_pumped_state',
     'PUMP_FLAGS',
     'WELLHEAD_PHASES',
+    # Power cycle
+    'is_dense_supercritical',
     # Results
     'ProductionProfile',
     'TimestepResult',

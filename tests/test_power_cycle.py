@@ -31,6 +31,7 @@ from superhot_wellbore.power_cycle import (DEFAULT_POWER_PARAMS,
                                            _flash_cycle, _merge_params,
                                            _two_stage_turbine,
                                            dry_steam_specific_work,
+                                           is_dense_supercritical,
                                            power_cycle_analysis)
 
 
@@ -173,6 +174,29 @@ class TestSupercriticalWellhead:
         at = _cycle_selection_enthalpy(self.P_CRIT)
         assert at == pytest.approx(just_below, rel=0.005)
         assert _cycle_selection_enthalpy(30.0) == at
+
+    @pytest.mark.parametrize('P_MPa, h_MJkg, expected', [
+        (25.0, 1.7, True),    # dense, liquid-like: this module flashes it
+        (25.0, 2.8, False),   # vapor-like: binary cycle
+        (15.0, 1.7, False),   # sub-critical: not supercritical at all
+    ])
+    def test_is_dense_supercritical(self, P_MPa, h_MJkg, expected):
+        """
+        The public dense-vs-vapor-like test that GEOPHIRES uses to
+        route a supercritical wellhead draws the same line as the
+        cycle selection: below the continued boundary enthalpy at or
+        above P_crit, and never below P_crit.
+        """
+        assert is_dense_supercritical(P_MPa, h_MJkg) is expected
+
+    def test_is_dense_supercritical_is_exported_by_the_client(self):
+        """GEOPHIRES reaches it through the client facade."""
+        from superhot_wellbore import client
+
+        assert client.is_dense_supercritical is is_dense_supercritical
+        assert 'is_dense_supercritical' in client.__all__
+        assert not is_dense_supercritical(float('nan'), 1.7), \
+            'a non-finite state is not dense'
 
 
 # ====================================================================

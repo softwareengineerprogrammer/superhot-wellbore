@@ -152,6 +152,12 @@ class TimestepResult:
         False if the values were interpolated between solves.
     message : str
         Diagnostic message, empty when nothing noteworthy happened.
+    interpolated_across_failure : bool
+        True on an interpolated (unsolved) timestep whose nearest
+        solve in time failed: its values were carried across that
+        failure from the successful solves and are an estimate the
+        caller may want to distrust. Always False on a solved
+        timestep.
     pumped : bool
         True if the production pump stage (pump.py) lifted the flow;
         the wellhead values then belong to the pumped upper segment.
@@ -204,6 +210,7 @@ class TimestepResult:
     success: bool = False
     solved: bool = False
     message: str = ''
+    interpolated_across_failure: bool = False
     pumped: bool = False
     pump_depth_m: float = 0.0
     P_pump_intake_MPa: float = float('nan')
@@ -727,30 +734,35 @@ def interpolate_timesteps(times_yr, solved_results,
     Returns
     -------
     list of TimestepResult
-        One entry per element of times_yr. Entries that were not
-        solved, and solved entries that failed, are linearly
-        interpolated from the successful solves; flags (cycle, choked,
-        converged, pumped, self_flowing, wellhead_phase, pump_flags)
-        are taken from the nearest successful solve. A failed solve
-        keeps solved=True and a message saying that its values were
-        interpolated, so that the failure stays visible. When no
-        solve succeeded, nothing is interpolated and every unsolved
-        entry reports success=False.
+        One entry per element of times_yr. Solved entries are returned
+        exactly as solved, whether they succeeded or failed: a failed
+        solve keeps success=False together with its own message, pump
+        flags and pump state, so that a well that stops delivering
+        stays visible to the caller. Entries that were not solved are
+        linearly interpolated from the successful solves only; flags
+        (cycle, choked, converged, pumped, self_flowing,
+        wellhead_phase, pump_flags) are taken from the nearest
+        successful solve. An unsolved entry whose nearest solve in
+        time failed is still filled in (it is a usable estimate) but
+        carries interpolated_across_failure=True and names the failed
+        solve in its message, leaving the decision to the caller.
+        When no solve succeeded, nothing is interpolated and every
+        unsolved entry reports success=False.
     """
     times = np.asarray(times_yr, dtype=float)
-    good_indices = sorted(i for i, ts in solved_results.items()
-                          if ts.success)
+    solved_indices = sorted(solved_results)
+    good_indices = [i for i in solved_indices if solved_results[i].success]
+    any_failed = len(good_indices) < len(solved_indices)
 
     profile = []
     for index, t in enumerate(times):
-        failed = None
         if index in solved_results:
-            if solved_results[index].success or not good_indices:
-                profile.append(solved_results[index])
-                continue
-            failed = solved_results[index]
+            # A solve is reported as it was solved, failed or not:
+            # rebuilding a failure from its neighbours would hide it.
+            profile.append(solved_results[index])
+            continue
 
-        result = TimestepResult(time_yr=float(t), solved=failed is not None)
+        result = TimestepResult(time_yr=float(t))
         if not good_indices:
             result.message = 'no successful solve available'
             profile.append(result)
@@ -784,13 +796,22 @@ def interpolate_timesteps(times_yr, solved_results,
             # Quality is only defined for a two-phase wellhead
             result.wellhead_quality = float('nan')
         result.success = True
-        if failed is not None:
-            result.message = ('coupled model failed at this state ('
-                              + (failed.message or 'no details')
-                              + '); values interpolated between '
-                              'neighbouring successful solves')
-        else:
-            result.message = 'interpolated between coupled-model solves'
+        result.message = 'interpolated between coupled-model solves'
+
+        if any_failed:
+            # The nearest solve of any outcome: when it failed, the
+            # values above were carried across that failure and the
+            # caller must be able to tell.
+            solved_times = times[solved_indices]
+            nearest_solve = solved_indices[
+                int(np.argmin(np.abs(solved_times - t)))]
+            if not solved_results[nearest_solve].success:
+                result.interpolated_across_failure = True
+                result.message = (
+                    f'interpolated from the successful coupled-model '
+                    f'solves across a failed solve at t = '
+                    f'{times[nearest_solve]:.2f} yr (nearest successful '
+                    f'solve at t = {times[nearest]:.2f} yr)')
         profile.append(result)
 
     return profile

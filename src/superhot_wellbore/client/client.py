@@ -28,10 +28,13 @@ The client does three things the raw modules leave to the caller:
 
     3. Isolates the caller from solver failures. Runtime warnings
        from the near-critical equation of state are suppressed,
-       failed states are reported through notes and interpolated from
-       the neighbouring successful solves instead of raising (unless
+       failed states are reported through notes and kept in the
+       history with success=False instead of raising (unless
        SolverConfig.strict is set), and every result carries a
-       success flag.
+       success flag. Only the successful solves feed the
+       interpolation; a filled-in timestep that lies nearer to a
+       failed solve than to a successful one says so
+       (TimestepResult.interpolated_across_failure).
 
     4. Pumps wells that do not self-flow. A prescribed flow rate the
        reservoir cannot lift to the surface (or lifts below the
@@ -438,10 +441,18 @@ class CoupledWellboreClient:
             result.message = ('the coupled model did not reach the '
                               'surface at this reservoir state')
 
-        if result.choked and not result.message:
-            result.message = ('choke limited: the wellbore reached the '
-                              'local sound speed before the target '
-                              'wellhead pressure')
+        if result.choked:
+            if (self.request.operating.control == 'flow'
+                    and 'choked_flow' not in result.pump_flags):
+                # A choked prescribed-flow march: the wellhead values
+                # above the choke point are approximate. Reported on
+                # the per-timestep flag channel (pump.PUMP_FLAGS) so
+                # that the caller can see and enforce it.
+                result.pump_flags.append('choked_flow')
+            if not result.message:
+                result.message = ('choke limited: the wellbore reached '
+                                  'the local sound speed before the '
+                                  'target wellhead pressure')
         return result
 
     def _power_cycle(self, raw):

@@ -167,8 +167,10 @@ Every `TimestepResult` then carries `pumped`, `pump_depth_m`,
 `self_flow_whp_MPa`, `self_flowing`, `wellhead_phase`, `wellhead_quality`,
 `dry_steam_work_MJkg` and `pump_flags` (a subset of
 `temperature_limit`, `depth_limit`, `self_flow_below_floor`,
-`two_phase_at_sandface`, `pump_outside_envelope`, `no_liquid_intake`); the
-wellhead values of a pumped timestep are those of the pumped upper segment.
+`two_phase_at_sandface`, `pump_outside_envelope`, `no_liquid_intake`, and
+`choked_flow` for a prescribed-flow march that reached the local sound
+speed); the wellhead values of a pumped timestep are those of the pumped
+upper segment.
 `power_cycle.dry_steam_specific_work(P)` is the gross specific turbine work of
 saturated steam expanded from `P` (the steam share of a two-phase wellhead
 stream). The pump stage applies to prescribed-flow solves only: a wellhead

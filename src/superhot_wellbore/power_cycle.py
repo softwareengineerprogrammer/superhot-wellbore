@@ -581,6 +581,43 @@ def _cycle_selection_enthalpy(P_MPa):
         return _H_CRIT_Jkg
 
 
+def is_dense_supercritical(P_MPa, h_MJkg):
+    """
+    True for a dense, liquid-like supercritical wellhead state.
+
+    A wellhead at or above the critical pressure is single-phase, but
+    the cycle selection rule still splits it at the boundary enthalpy
+    of _cycle_selection_enthalpy (the critical-point enthalpy h_crit):
+    below it the fluid is compressed-liquid-like and this module
+    flashes it, above it the fluid is vapor-like and goes to the
+    binary cycle. GEOPHIRES uses this helper to send a compressed-
+    liquid-like supercritical wellhead to its liquid-water plant
+    correlations instead of the flash cycle, so that both programs
+    draw the dense-vs-vapor-like line in the same place. The superheat
+    margin that the cycle selection adds on top of the boundary is not
+    applied here.
+
+    Parameters
+    ----------
+    P_MPa : float
+        Wellhead pressure [MPa].
+    h_MJkg : float
+        Wellhead specific enthalpy [MJ/kg].
+
+    Returns
+    -------
+    bool
+        True when P_MPa >= P_crit (22.064 MPa) and h_MJkg lies below
+        the cycle-selection enthalpy at that pressure; False otherwise,
+        including for a sub-critical pressure or a non-finite input.
+    """
+    if not (np.isfinite(P_MPa) and np.isfinite(h_MJkg)):
+        return False
+    if P_MPa < _P_CRIT_MPa:
+        return False
+    return bool(float(h_MJkg) * 1e6 < _cycle_selection_enthalpy(float(P_MPa)))
+
+
 # ====================================================================
 # BINARY CYCLE (superheated inlet)
 # ====================================================================

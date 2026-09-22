@@ -67,7 +67,11 @@ from ..wellbore_physics import (DEFAULT_WELL_PARAMS, GRAVITY, P_CRIT_MPA,
 #: Flags a pumped solve can report (subset appears in pump_flags)
 PUMP_FLAGS = ('temperature_limit', 'depth_limit', 'self_flow_below_floor',
               'two_phase_at_sandface', 'pump_outside_envelope',
-              'no_liquid_intake')
+              'no_liquid_intake',
+              # raised by the client, not here: a prescribed-flow march
+              # reached the local sound speed, so the wellhead values
+              # above the choke point are approximate
+              'choked_flow')
 
 #: Wellhead phase labels
 WELLHEAD_PHASES = ('single_phase_liquid', 'two_phase',
