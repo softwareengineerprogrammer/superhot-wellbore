@@ -54,7 +54,9 @@ from typing import Any, List
 
 import numpy as np
 
+from ..wellbore_physics import P_CRIT_MPA
 from . import units
+from .pump import wellhead_state
 
 
 # ====================================================================
@@ -714,6 +716,31 @@ def _quality_for_interpolation(qualities, phases):
     return filled
 
 
+def _match_phase_to_pressure(result):
+    """
+    Re-derive the copied wellhead phase of an interpolated timestep
+    whose pressure lies on the other side of the critical pressure.
+
+    'supercritical' is a pressure regime (see pump.wellhead_state), so
+    a label copied from the nearest solve contradicts the interpolated
+    wellhead pressure when the pressure crosses P_crit between the
+    solves: a wellhead drifting down through 22.064 MPa would keep
+    'supercritical' at 22.0639 MPa, where it is a compressed liquid
+    (or a two-phase or vapour state) with no dense-supercritical
+    treatment left for it. The phase (and quality) of such a step are
+    those of its own interpolated pressure and enthalpy; any other
+    copied label is kept, as documented in interpolate_timesteps.
+    """
+    above_critical = (np.isfinite(result.whp_MPa)
+                      and result.whp_MPa >= P_CRIT_MPA)
+    if (result.wellhead_phase == 'supercritical') == above_critical:
+        return
+    phase, quality = wellhead_state(result.whp_MPa, result.h_wellhead_MJkg)
+    if phase:
+        result.wellhead_phase = phase
+        result.wellhead_quality = quality
+
+
 def interpolate_timesteps(times_yr, solved_results,
                           P_reservoir_MPa=None, T_reservoir_C=None):
     """
@@ -742,10 +769,13 @@ def interpolate_timesteps(times_yr, solved_results,
         linearly interpolated from the successful solves only; flags
         (cycle, choked, converged, pumped, self_flowing,
         wellhead_phase, pump_flags) are taken from the nearest
-        successful solve. An unsolved entry whose nearest solve in
-        time failed is still filled in (it is a usable estimate) but
-        carries interpolated_across_failure=True and names the failed
-        solve in its message, leaving the decision to the caller.
+        successful solve, except a wellhead phase on the other side of
+        the critical pressure from the entry's own interpolated
+        pressure, which is re-derived (_match_phase_to_pressure). An
+        unsolved entry whose nearest solve in time failed is still
+        filled in (it is a usable estimate) but carries
+        interpolated_across_failure=True and names the failed solve in
+        its message, leaving the decision to the caller.
         When no solve succeeded, nothing is interpolated and every
         unsolved entry reports success=False.
     """
@@ -792,6 +822,7 @@ def interpolate_timesteps(times_yr, solved_results,
         for attribute in TimestepResult.COPIED_FIELDS:
             setattr(result, attribute, getattr(reference, attribute))
         result.pump_flags = list(reference.pump_flags)
+        _match_phase_to_pressure(result)
         if result.wellhead_phase != 'two_phase':
             # Quality is only defined for a two-phase wellhead
             result.wellhead_quality = float('nan')

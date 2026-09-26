@@ -387,6 +387,41 @@ def test_wellhead_quality_interpolates_towards_the_liquid_limit():
         'no quality for a single-phase wellhead'
 
 
+def test_phase_follows_the_pressure_across_the_critical_point():
+    """A step interpolated below P_crit is not 'supercritical'.
+
+    The NOAK 440 C / 57 C/km CATF cell: the self-flowing wellhead
+    drifts down through the critical pressure between two solves, so
+    the step at 22.0639 MPa copied 'supercritical' from the solve above
+    it and lost the dense-supercritical treatment. Its own state is a
+    compressed liquid (h = 1.968 MJ/kg against h_f = 2.080 MJ/kg).
+    """
+    dense = dict(pumped=False, self_flowing=True, pump_flags=[],
+                 pump_depth_m=0.0, dP_pump_MPa=0.0, pump_power_MWe=0.0,
+                 wellhead_phase='supercritical', T_wellhead_C=373.86,
+                 h_wellhead_MJkg=1.968)
+    liquid = {**dense, 'wellhead_phase': 'single_phase_liquid'}
+    solved = {0: _pump_step(0.0, whp_MPa=22.0660, **dense),
+              3: _pump_step(4.0, whp_MPa=22.0560, **liquid)}
+    filled = interpolate_timesteps([0.0, 0.5, 1.5, 4.0], solved)
+    assert filled[1].whp_MPa == pytest.approx(22.06475), 'above P_crit'
+    assert filled[1].wellhead_phase == 'supercritical', 'label kept'
+    assert filled[2].whp_MPa == pytest.approx(22.06225), \
+        'below P_crit, nearest solve above it'
+    assert filled[2].wellhead_phase == 'single_phase_liquid', \
+        'phase of its own pressure and enthalpy'
+    assert np.isnan(filled[2].wellhead_quality), 'no quality for a liquid'
+
+    # And the other way: a sub-critical label copied above P_crit
+    rising = interpolate_timesteps(
+        [0.0, 1.0, 4.0],
+        {0: _pump_step(0.0, whp_MPa=22.0630, **liquid),
+         2: _pump_step(4.0, whp_MPa=22.0700, **dense)})
+    assert rising[1].whp_MPa == pytest.approx(22.06475), 'above P_crit'
+    assert rising[1].wellhead_phase == 'supercritical', \
+        'a step above P_crit is supercritical'
+
+
 def test_profile_pump_accessors_and_summary():
     """ProductionProfile exposes the pump series and headline numbers."""
     from superhot_wellbore.client.results import ProductionProfile
