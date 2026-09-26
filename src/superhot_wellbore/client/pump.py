@@ -570,9 +570,17 @@ def solve_pumped_state(P_fz_MPa, h_fz_Jkg, mdot, rock_temperatures,
         segment['surface'] = None
         return seg_profiles[1][-1][1]
 
-    dP0 = target + rho1 * GRAVITY * z_p / 1e6 - P1
-    dP, whp, converged, n_marches = _solve_pump_pressure(
-        evaluate, target, dP0, pump_cfg.max_dP_MPa, pump_cfg.tolerance_MPa)
+    if reached and whp_self >= target:
+        # Pumped only because the self-flow WHP is below the floor, but
+        # it already meets the pump target: a pump can only raise the
+        # pressure, so it runs without a pressure rise (the search on
+        # dP >= 0 could not come down to the target).
+        dP, whp, converged, n_marches = 0.0, evaluate(0.0), True, 1
+    else:
+        dP0 = target + rho1 * GRAVITY * z_p / 1e6 - P1
+        dP, whp, converged, n_marches = _solve_pump_pressure(
+            evaluate, target, dP0, pump_cfg.max_dP_MPa,
+            pump_cfg.tolerance_MPa)
 
     result.update({
         'pumped': True,

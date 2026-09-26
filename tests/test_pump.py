@@ -159,13 +159,25 @@ def test_self_flow_above_the_floor_is_left_alone(analytic_march):
 
 
 def test_self_flow_below_the_floor_is_pumped_in_auto(analytic_march):
-    """Reaching the surface below the floor counts as not self-flowing."""
+    """Reaching the surface below the floor counts as not self-flowing.
+
+    Here the self-flow WHP (~2.5 MPa) is below the floor but already
+    above the pump target (the vapour pressure at the intake plus the
+    NPSH margin): the pump runs without a pressure rise. The search on
+    dP >= 0 used to fail such a well (the CATF NOAK 200 C / 25 C/km
+    cell).
+    """
     raw = _solve(P_SELF_FLOWS, PumpConfig(mode='auto',
                                           min_self_flow_whp_MPa=5.0))
+    assert raw['success'], raw.get('message')
     assert raw['pumped'] and not raw['self_flowing'], 'pumped'
     assert 'self_flow_below_floor' in raw['pump_flags'], raw['pump_flags']
     assert np.isfinite(raw['self_flow_whp_MPa']), \
         'the unpumped WHP is still reported'
+    assert raw['dP_pump_MPa'] == 0.0 and raw['pump_power_MWe'] == 0.0, \
+        'no pressure rise'
+    assert raw['whp_MPa'] == pytest.approx(raw['self_flow_whp_MPa'],
+                                           abs=0.01), 'the self-flow WHP'
 
 
 def test_target_whp_raises_the_floor(analytic_march):
