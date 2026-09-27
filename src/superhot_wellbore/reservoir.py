@@ -284,7 +284,7 @@ import warnings
 import numpy as np
 import CoolProp.CoolProp as CP
 
-from wellbore_physics import (
+from .wellbore_physics import (
     wellbore_simulate,
     fluid_properties_Ph,
     DEFAULT_WELL_PARAMS,

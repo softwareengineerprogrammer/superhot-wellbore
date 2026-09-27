@@ -1,0 +1,7 @@
+# Dependencies are declared in pyproject.toml; this file only installs
+# the project itself, together with the figure and test extras, into
+# the active environment:
+#
+#     pip install -r requirements.txt
+#
+-e .[dev]

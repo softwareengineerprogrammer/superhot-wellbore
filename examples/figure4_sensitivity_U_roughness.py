@@ -28,12 +28,12 @@ import CoolProp.CoolProp as CP
 # Suppress runtime warnings during solver exploration
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
-from reservoir import (
+from superhot_wellbore.reservoir import (
     coupled_model, evaluate_at_flow_rates,
     rock_temperature_linear, depth_for_pressure,
     DEFAULT_RESERVOIR_PARAMS, DEFAULT_WELL_PARAMS,
 )
-from power_cycle import power_cycle_analysis
+from superhot_wellbore.power_cycle import power_cycle_analysis
 
 # ============================================================================
 # SCENARIO PARAMETERS

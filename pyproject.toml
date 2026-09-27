@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superhot-wellbore"
+version = "1.0.0"
+description = "Coupled reservoir-wellbore-power cycle model for superhot geothermal well performance"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Samuel W. Scott" },
+]
+keywords = [
+    "geothermal",
+    "superhot",
+    "wellbore",
+    "reservoir",
+    "power cycle",
+    "GEOPHIRES",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "CoolProp",
+    "iapws",
+    "numpy",
+    "scipy",
+]
+
+[project.optional-dependencies]
+figures = [
+    "matplotlib",
+]
+test = [
+    "pytest>=7.0",
+]
+dev = [
+    "superhot-wellbore[figures,test]",
+]
+
+[project.urls]
+Homepage = "https://github.com/softwareengineerprogrammer/superhot-wellbore"
+Article = "https://doi.org/10.1016/j.geothermics.2026.103784"
+
+[project.scripts]
+superhot-geophires = "superhot_wellbore.client.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests that run the coupled reservoir-wellbore model",
+]

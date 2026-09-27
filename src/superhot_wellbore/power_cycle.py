@@ -89,6 +89,15 @@ state (using enthalpy-pressure, not temperature-pressure):
     h_surface >= h_sat,vapor(WHP) + margin  -->  binary cycle
     h_surface <  h_sat,vapor(WHP) + margin  -->  flash cycle
 
+Above the critical pressure (22.064 MPa) the saturation curve ends
+and h_sat,vapor(WHP) does not exist, but the wellhead fluid is
+single-phase and can still be routed. The boundary is continued as
+the critical-point enthalpy h_crit = 2.084 MJ/kg (the endpoint of
+the saturated-vapor curve), so selection is continuous across
+P_crit: a dense, liquid-like supercritical fluid flashes, a
+vapor-like one goes to the binary cycle. Deep superhot wells can
+reach the wellhead in this state (e.g. 375 C at 26 MPa).
+
 Binary cycle (superheated or single-phase vapor inlet):
     Geothermal steam transfers heat to a secondary working fluid
     (water at P_wf = 1.0 MPa) via a counter-flow heat exchanger.
@@ -339,6 +348,13 @@ DEFAULT_POWER_PARAMS = {
 # when the flash cycle passes h_g as the turbine inlet enthalpy.
 _TURBINE_SUPERHEAT_TOL_Jkg = 1.0e3  # 1 kJ/kg
 
+# IAPWS-95 critical point of water (Wagner and Pruss, 2002).
+# The saturation curve ends here; CoolProp PQ lookups fail at or
+# above _P_CRIT_MPa. _H_CRIT_Jkg is the enthalpy at (T_crit,
+# rho_crit), i.e. the endpoint of the saturated-vapor curve.
+_P_CRIT_MPa = 22.064
+_H_CRIT_Jkg = 2.0843e6
+
 
 # ====================================================================
 # PUBLIC API
@@ -423,8 +439,9 @@ def power_cycle_analysis(coupled_result, params=None):
             return fail
 
         # Saturated vapor enthalpy at WHP for cycle selection
-        h_sat_vap = CP.PropsSI('H', 'P', P_whp_MPa * 1e6, 'Q', 1,
-                               'Water')
+        # (continued through the critical point for supercritical
+        # wellhead pressure; see _cycle_selection_enthalpy).
+        h_sat_vap = _cycle_selection_enthalpy(P_whp_MPa)
 
         # Cycle selection based on H-P state
         is_superheated = h_in_Jkg >= (h_sat_vap + pp['superheat_margin_Jkg'])
@@ -470,6 +487,135 @@ def power_cycle_analysis(coupled_result, params=None):
         warnings.warn(f"power_cycle_analysis failed: {e}",
                       RuntimeWarning, stacklevel=2)
         return fail
+
+
+def dry_steam_specific_work(P_MPa, params=None):
+    """
+    Gross specific turbine work of saturated steam expanded from P.
+
+    One kg/s of saturated vapour at P_MPa is expanded to the
+    condenser pressure by _two_stage_turbine(), i.e. through the same
+    DiPippo/Baumann wet-stage model the flash cycle uses once its
+    separated steam enters the turbine. This is the dry-steam share of
+    a two-phase wellhead stream: a caller that separates the wellhead
+    mixture at WHP can price the steam fraction with this number and
+    the liquid fraction with any liquid-water correlation.
+
+    Parameters
+    ----------
+    P_MPa : float
+        Turbine inlet (separator) pressure [MPa]. Must lie above the
+        condenser pressure and below the critical pressure, where
+        saturated vapour exists.
+    params : dict or None
+        Power cycle parameters, merged over DEFAULT_POWER_PARAMS
+        (P_condenser_MPa, eta_turbine_dry and x_exit_min are used).
+
+    Returns
+    -------
+    float
+        Gross specific work [MJ/kg of steam], or NaN when P_MPa is
+        not a sub-critical pressure above the condenser pressure or
+        when the expansion fails.
+    """
+    pp = _merge_params(params)
+    try:
+        P = float(P_MPa)
+    except (TypeError, ValueError):
+        return np.nan
+    if not np.isfinite(P) or P >= _P_CRIT_MPa or P <= pp['P_condenser_MPa']:
+        return np.nan
+    try:
+        h_g = CP.PropsSI('H', 'P', P * 1e6, 'Q', 1, 'Water')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            result = _two_stage_turbine(1.0, h_g, P, pp)
+    except Exception:
+        return np.nan
+    if not result.get('success', False):
+        return np.nan
+    # power_MWe of a 1 kg/s stream is numerically the specific work in MJ/kg
+    return float(result['power_MWe'])
+
+
+# ====================================================================
+# CYCLE SELECTION
+# ====================================================================
+
+def _cycle_selection_enthalpy(P_MPa):
+    """
+    Vapor-like / liquid-like boundary enthalpy [J/kg] at pressure P.
+
+    Below the critical pressure this is the saturated vapor enthalpy
+    h_g(P), the threshold used by the cycle selection rule (see the
+    module docstring). Above it there is no saturation curve: a PQ
+    lookup raises, but the wellhead fluid is single-phase and must
+    still be routed to a cycle. The boundary is continued as the
+    critical-point enthalpy h_crit, the endpoint of the saturated-
+    vapor curve, so selection is continuous across P_crit.
+
+    Together with the default superheat margin (50 kJ/kg) this
+    tracks the pseudo-critical (Widom) line to within a few kelvin
+    over 22-30 MPa, so a dense, liquid-like supercritical fluid
+    (e.g. 375 C at 26 MPa, h = 1.83 MJ/kg) flashes, exactly as the
+    same enthalpy would at 21.9 MPa, while a vapor-like fluid
+    (e.g. 500 C at 25 MPa, h = 3.17 MJ/kg) goes to the binary cycle.
+
+    Parameters
+    ----------
+    P_MPa : float
+        Wellhead pressure [MPa].
+
+    Returns
+    -------
+    float
+        Boundary enthalpy [J/kg].
+    """
+    if P_MPa >= _P_CRIT_MPa:
+        return _H_CRIT_Jkg
+    try:
+        return CP.PropsSI('H', 'P', P_MPa * 1e6, 'Q', 1, 'Water')
+    except ValueError:
+        # Numerical band just below P_crit where the PQ flash does
+        # not converge; h_g is within 0.3% of h_crit there.
+        return _H_CRIT_Jkg
+
+
+def is_dense_supercritical(P_MPa, h_MJkg):
+    """
+    True for a dense, liquid-like supercritical wellhead state.
+
+    A wellhead at or above the critical pressure is single-phase, but
+    the cycle selection rule still splits it at the boundary enthalpy
+    of _cycle_selection_enthalpy (the critical-point enthalpy h_crit):
+    below it the fluid is compressed-liquid-like and this module
+    flashes it, above it the fluid is vapor-like and goes to the
+    binary cycle. GEOPHIRES uses this helper to send a compressed-
+    liquid-like supercritical wellhead to its liquid-water plant
+    correlations instead of the flash cycle, so that both programs
+    draw the dense-vs-vapor-like line in the same place. The superheat
+    margin that the cycle selection adds on top of the boundary is not
+    applied here.
+
+    Parameters
+    ----------
+    P_MPa : float
+        Wellhead pressure [MPa].
+    h_MJkg : float
+        Wellhead specific enthalpy [MJ/kg].
+
+    Returns
+    -------
+    bool
+        True when P_MPa >= P_crit (22.064 MPa) and h_MJkg lies below
+        the cycle-selection enthalpy at that pressure; False otherwise,
+        including for a sub-critical pressure or a non-finite input.
+    """
+    if not (np.isfinite(P_MPa) and np.isfinite(h_MJkg)):
+        return False
+    if P_MPa < _P_CRIT_MPa:
+        return False
+    return bool(float(h_MJkg) * 1e6 < _cycle_selection_enthalpy(float(P_MPa)))
 
 
 # ====================================================================
@@ -1023,370 +1169,3 @@ def _merge_params(user_params):
     if user_params is not None:
         pp.update(user_params)
     return pp
-
-# ====================================================================
-# TESTS
-# ====================================================================
-
-if __name__ == '__main__':
-
-    print('power_cycle.py -- self-test')
-    print('=' * 60)
-
-    passed = 0
-    failed = 0
-
-    def check(name, condition, detail=''):
-        global passed, failed
-        if condition:
-            passed += 1
-            print(f'  PASS: {name}')
-        else:
-            failed += 1
-            print(f'  FAIL: {name}  {detail}')
-
-    def _h_MJkg(T_C, P_MPa):
-        """Compute enthalpy [MJ/kg] from (T, P) for test inputs."""
-        return CP.PropsSI('H', 'T', T_C + 273.15,
-                          'P', P_MPa * 1e6, 'Water') / 1e6
-
-    def _mock_cm(mass_flow, P_whp, h_surface_MJkg,
-                 h_feedzone_MJkg=None, P_bh_MPa=None):
-        """Build a mock coupled_model output dict for testing."""
-        d = {
-            'mass_flow_kgs': mass_flow,
-            'whp_MPa': P_whp,
-            'h_surface_MJkg': h_surface_MJkg,
-            'success': True,
-        }
-        if h_feedzone_MJkg is not None:
-            d['h_feedzone_MJkg'] = h_feedzone_MJkg
-        if P_bh_MPa is not None:
-            d['P_bh_MPa'] = P_bh_MPa
-        return d
-
-    # -----------------------------------------------------------------
-    print('\n=== 1. Cycle selection logic ===')
-    # -----------------------------------------------------------------
-    # Superheated/supercritical vapor at the wellhead should route to
-    # the binary cycle. Two-phase mixture should route to flash.
-    # The threshold is h_sat_vapor(WHP) + superheat_margin_Jkg.
-
-    # Superheated: 480 C at 10 MPa -> well above saturation
-    r = power_cycle_analysis(_mock_cm(30.0, 10.0, _h_MJkg(480.0, 10.0)))
-    check('Superheated inlet -> binary cycle',
-          r['cycle'] == 'binary', f"got {r['cycle']}")
-
-    # Two-phase: h midway between h_f and h_g at 5 MPa
-    h_f_5 = CP.PropsSI('H', 'P', 5e6, 'Q', 0, 'Water') / 1e6
-    h_g_5 = CP.PropsSI('H', 'P', 5e6, 'Q', 1, 'Water') / 1e6
-    h_2phase = 0.5 * (h_f_5 + h_g_5)
-    r = power_cycle_analysis(_mock_cm(50.0, 5.0, h_2phase))
-    check('Two-phase inlet -> flash cycle',
-          r['cycle'] == 'flash', f"got {r['cycle']}")
-
-    # -----------------------------------------------------------------
-    print('\n=== 2. First Law consistency (binary cycle) ===')
-    # -----------------------------------------------------------------
-    # For a binary cycle, the thermal efficiency must satisfy:
-    #   0 < eta_th < 1  (cannot produce more work than heat input)
-    # Typical geothermal binary plants: eta_th ~ 10-25% (DiPippo,
-    # 2016, Sec. 8.2.5; Mines, 2016, Sec. 13.3.2).
-
-    for T_C, P_MPa, desc in [(400, 5.0, '400C/5MPa'),
-                              (480, 10.0, '480C/10MPa'),
-                              (550, 15.0, '550C/15MPa')]:
-        cm = _mock_cm(30.0, P_MPa, _h_MJkg(T_C, P_MPa))
-        r = power_cycle_analysis(cm)
-        if r['success'] and r['cycle'] == 'binary':
-            check(f'{desc}: 0 < eta_th={r["eta_thermal"]:.3f} < 1',
-                  0 < r['eta_thermal'] < 1.0)
-            # Specific output must equal power / mass flow
-            w_check = r['power_MWe'] / 30.0
-            check(f'{desc}: w = W/m = {w_check:.4f} MJ/kg',
-                  abs(w_check - r['specific_output_MJkg']) < 1e-6)
-
-    # -----------------------------------------------------------------
-    print('\n=== 3. Second Law bounds (both cycles) ===')
-    # -----------------------------------------------------------------
-    # Utilization efficiency must satisfy 0 < eta_u < 1 for any
-    # feasible operating condition. It can never exceed 1 because
-    # that would violate the Second Law of thermodynamics.
-
-    test_cases = [
-        (_mock_cm(30.0, 10.0, _h_MJkg(480, 10.0)), 'binary 480C/10MPa'),
-        (_mock_cm(50.0, 5.0, h_2phase), 'flash h=2-phase/5MPa'),
-        (_mock_cm(20.0, 4.0, _h_MJkg(440, 4.0)), 'binary 440C/4MPa'),
-    ]
-    for cm, desc in test_cases:
-        r = power_cycle_analysis(cm)
-        if r['success']:
-            check(f'{desc}: 0 < eta_u={r["eta_utilization"]:.3f} < 1',
-                  0 < r['eta_utilization'] < 1.0)
-            check(f'{desc}: exergy rate E > 0',
-                  r['exergy_rate_MW'] > 0,
-                  f"E = {r['exergy_rate_MW']:.2f} MW")
-
-    # -----------------------------------------------------------------
-    print('\n=== 4. DiPippo equation: outlet enthalpy bounds ===')
-    # -----------------------------------------------------------------
-    # The actual turbine outlet enthalpy h_c from the DiPippo
-    # implicit equation must satisfy h_is < h_c < h_in, where
-    # h_is is the isentropic outlet enthalpy. This verifies that
-    # the Baumann correction produces a physically reasonable
-    # result between the ideal (isentropic) and no-work limits.
-
-    P_cond = DEFAULT_POWER_PARAMS['P_condenser_MPa']
-    eta_td = DEFAULT_POWER_PARAMS['eta_turbine_dry']
-
-    for P_in, desc in [(1.0, '1 MPa sat vapor'),
-                        (5.0, '5 MPa sat vapor'),
-                        (10.0, '10 MPa sat vapor')]:
-        h_in = CP.PropsSI('H', 'P', P_in * 1e6, 'Q', 1, 'Water')
-        s_in = CP.PropsSI('S', 'P', P_in * 1e6, 'Q', 1, 'Water')
-        h_is = CP.PropsSI('H', 'S', s_in,
-                           'P', P_cond * 1e6, 'Water')
-        h_f = CP.PropsSI('H', 'P', P_cond * 1e6, 'Q', 0, 'Water')
-        h_g = CP.PropsSI('H', 'P', P_cond * 1e6, 'Q', 1, 'Water')
-        h_c = _dipippo_outlet_enthalpy(h_in, h_is, h_f, h_g, eta_td)
-        check(f'{desc}: h_is={h_is/1e3:.0f} < h_c={h_c/1e3:.0f} '
-              f'< h_in={h_in/1e3:.0f} kJ/kg',
-              h_is < h_c < h_in,
-              f'h_is={h_is/1e3:.1f}, h_c={h_c/1e3:.1f}, '
-              f'h_in={h_in/1e3:.1f}')
-        # Exit quality should be between 0 and 1
-        x_c = (h_c - h_f) / (h_g - h_f)
-        check(f'{desc}: exit quality x={x_c:.3f} in (0, 1)',
-              0 < x_c < 1)
-
-    # -----------------------------------------------------------------
-    print('\n=== 5. Flash cycle: monotonic power with enthalpy ===')
-    # -----------------------------------------------------------------
-    # At fixed WHP and flash pressure, increasing the inlet enthalpy
-    # increases the separator steam fraction (Eq. 5.7) and therefore
-    # the turbine mass flow and power output. This tests the entire
-    # flash path from lever rule through turbine expansion.
-
-    P_flash_test = 5.0  # MPa (WHP for the flash cases)
-    P_flash_sep = DEFAULT_POWER_PARAMS['P_flash_MPa']  # 1.0 MPa
-    h_f_fl = CP.PropsSI('H', 'P', P_flash_sep * 1e6, 'Q', 0, 'Water') / 1e6
-    h_g_fl = CP.PropsSI('H', 'P', P_flash_sep * 1e6, 'Q', 1, 'Water') / 1e6
-
-    # Enthalpy values spanning the two-phase dome at 1 MPa flash
-    h_vals = np.linspace(h_f_fl + 0.05, h_g_fl - 0.05, 6)
-    powers = []
-    for h_val in h_vals:
-        r = power_cycle_analysis(_mock_cm(50.0, P_flash_test, h_val))
-        if r['success']:
-            powers.append(r['power_MWe'])
-        else:
-            powers.append(np.nan)
-
-    valid = [p for p in powers if not np.isnan(p)]
-    check(f'Flash power increases with enthalpy ({len(valid)} points)',
-          all(valid[i] <= valid[i+1] for i in range(len(valid)-1)),
-          f'powers = {[f"{p:.2f}" for p in valid]}')
-
-    # -----------------------------------------------------------------
-    print('\n=== 6. Binary cycle: higher temperature -> more power ===')
-    # -----------------------------------------------------------------
-    # At fixed pressure and mass flow, increasing the wellhead
-    # temperature (and therefore enthalpy) should increase the
-    # turbine power output, because more heat is transferred to
-    # the working fluid in the heat exchanger.
-
-    P_bin = 10.0  # MPa
-    m_bin = 30.0  # kg/s
-    temps = [380, 420, 460, 500, 540]
-    bin_powers = []
-    for T in temps:
-        r = power_cycle_analysis(_mock_cm(m_bin, P_bin, _h_MJkg(T, P_bin)))
-        if r['success'] and r['cycle'] == 'binary':
-            bin_powers.append(r['power_MWe'])
-        else:
-            bin_powers.append(np.nan)
-
-    valid_bp = [p for p in bin_powers if not np.isnan(p)]
-    check(f'Binary power increases with T ({len(valid_bp)} points)',
-          len(valid_bp) >= 3 and all(
-              valid_bp[i] <= valid_bp[i+1]
-              for i in range(len(valid_bp)-1)),
-          f'powers = {[f"{p:.2f}" for p in valid_bp]}')
-
-    # -----------------------------------------------------------------
-    print('\n=== 7. Edge cases and infeasible conditions ===')
-    # -----------------------------------------------------------------
-
-    # Zero mass flow -> should fail
-    r = power_cycle_analysis(_mock_cm(0.0, 10.0, 3.0))
-    check('Zero mass flow -> failure', not r['success'])
-
-    # WHP below flash pressure -> flash should fail
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', RuntimeWarning)
-        r = power_cycle_analysis(_mock_cm(50.0, 0.5, 2.5))
-    check('WHP < P_flash -> failure', not r['success'],
-          f"got success={r['success']}, cycle={r['cycle']}")
-
-    # Subcooled liquid: h well below h_f at flash pressure
-    h_f_1MPa = CP.PropsSI('H', 'P', 1e6, 'Q', 0, 'Water') / 1e6
-    h_sub = h_f_1MPa * 0.5  # clearly subcooled
-    r = power_cycle_analysis(_mock_cm(50.0, 5.0, h_sub))
-    check('Subcooled liquid -> failure', not r['success'],
-          f"h={h_sub:.3f} MJ/kg, h_f(1MPa)={h_f_1MPa:.3f}")
-
-    # Very cold fluid (T < 120 C) -> should fail
-    r = power_cycle_analysis(_mock_cm(50.0, 5.0, _h_MJkg(100.0, 5.0)))
-    check('Cold fluid (100 C) -> failure', not r['success'])
-
-    # Missing required key -> should fail gracefully
-    r = power_cycle_analysis({'whp_MPa': 10.0, 'h_surface_MJkg': 3.0})
-    check('Missing mass_flow_kgs -> failure', not r['success'])
-
-    # -----------------------------------------------------------------
-    print('\n=== 8. Baumann rule: wet turbine efficiency ===')
-    # -----------------------------------------------------------------
-    # The Baumann rule (DiPippo, 2012, Eq. 5.12) gives eta_tw for
-    # a saturated vapor inlet (x_in = 1) as:
-    #   eta_tw = eta_td * (1 + x_out) / 2
-    # At x_out = 1: eta_tw = eta_td (no penalty for dry exhaust)
-    # At x_out = 0.85: eta_tw = 0.85 * 1.85/2 = 0.786
-
-    check('Baumann: x=1.0 -> eta = eta_td',
-          abs(_baumann_efficiency(0.85, 1.0) - 0.85) < 1e-10)
-    check('Baumann: x=0.85 -> eta = 0.786',
-          abs(_baumann_efficiency(0.85, 0.85) - 0.85 * 1.85 / 2) < 1e-10)
-    check('Baumann: x=0.0 -> eta = eta_td/2',
-          abs(_baumann_efficiency(0.85, 0.0) - 0.425) < 1e-10)
-
-    # -----------------------------------------------------------------
-    print('\n=== 9. Feedzone exergy with P_bh ===')
-    # -----------------------------------------------------------------
-    # When both h_feedzone_MJkg and P_bh_MPa are provided, feedzone
-    # exergy should use the correct (h_fz, P_bh) state. When only
-    # h_feedzone is given, it should fall back to P_whp for entropy.
-
-    h_wh = _h_MJkg(440, 4.0)
-    h_fz = _h_MJkg(500, 25.0)
-
-    # With P_bh: full feedzone state
-    cm_full = _mock_cm(48.0, 4.0, h_wh,
-                       h_feedzone_MJkg=h_fz, P_bh_MPa=25.0)
-    r_full = power_cycle_analysis(cm_full)
-    check('Feedzone exergy with P_bh (not NaN)',
-          not np.isnan(r_full['eta_utilization_fz']),
-          f"eta_u_fz = {r_full['eta_utilization_fz']}")
-
-    # Without P_bh: falls back to P_whp
-    cm_no_pbh = _mock_cm(48.0, 4.0, h_wh, h_feedzone_MJkg=h_fz)
-    r_no_pbh = power_cycle_analysis(cm_no_pbh)
-    check('Feedzone exergy without P_bh (not NaN)',
-          not np.isnan(r_no_pbh['eta_utilization_fz']))
-
-    # The two should differ because entropy depends on pressure
-    check('P_bh vs P_whp gives different feedzone exergy',
-          abs(r_full['exergy_rate_fz_MW']
-              - r_no_pbh['exergy_rate_fz_MW']) > 0.01,
-          f"E_fz(P_bh)={r_full['exergy_rate_fz_MW']:.2f}, "
-          f"E_fz(P_whp)={r_no_pbh['exergy_rate_fz_MW']:.2f}")
-
-    check('Both exergy rates positive and finite',
-          0 < r_full['exergy_rate_MW'] < 500 and
-          0 < r_full['exergy_rate_fz_MW'] < 500)
-
-    # Without feedzone enthalpy -> fz metrics are NaN
-    cm_no_fz = _mock_cm(48.0, 4.0, h_wh)
-    check('Without feedzone enthalpy -> fz metrics are NaN',
-          np.isnan(power_cycle_analysis(cm_no_fz)['eta_utilization_fz']))
-
-    # -----------------------------------------------------------------
-    print('\n=== 10. Thermal efficiency is NaN for flash, real for binary ===')
-    # -----------------------------------------------------------------
-    # Flash plants are not closed thermodynamic cycles, so thermal
-    # efficiency is not conventionally defined (DiPippo, 2012,
-    # Sec. 5.4.7). Binary cycles should have real eta_th.
-
-    r_bin = power_cycle_analysis(
-        _mock_cm(30.0, 10.0, _h_MJkg(480, 10.0)))
-    r_fl = power_cycle_analysis(_mock_cm(50.0, 5.0, h_2phase))
-    check('Binary: eta_th is real',
-          not np.isnan(r_bin['eta_thermal']),
-          f"eta_th = {r_bin['eta_thermal']}")
-    check('Flash: eta_th is NaN',
-          np.isnan(r_fl['eta_thermal']))
-
-    # -----------------------------------------------------------------
-    print(f'\n{"=" * 60}')
-    print(f'Results: {passed} passed, {failed} failed')
-    if failed > 0:
-        print('*** SOME TESTS FAILED ***')
-    else:
-        print('All tests passed.')
-        
-    # -----------------------------------------------------------------
-    print('\n=== 12. Turbine exit quality warning threshold ===')
-    # -----------------------------------------------------------------
-    # This test does two things:
-    #   (1) reports outlet qualities for several representative cases
-    #   (2) verifies that the moisture warning is triggered when the
-    #       exit quality drops below x_exit_min = 0.85
-    #
-    # The realistic cases below use saturated-vapor turbine inlet
-    # conditions at several pressures, which correspond to the wet-stage
-    # test cases already used above. A deliberately degraded case is
-    # then created by tightening the quality threshold so that the
-    # warning mechanism itself can be tested deterministically.
-
-    P_cond = DEFAULT_POWER_PARAMS['P_condenser_MPa']
-    eta_td = DEFAULT_POWER_PARAMS['eta_turbine_dry']
-
-    realistic_cases = [
-        (1.0, 'sat. vapor at 1 MPa'),
-        (5.0, 'sat. vapor at 5 MPa'),
-        (10.0, 'sat. vapor at 10 MPa'),
-    ]
-
-    x_realistic = []
-
-    for P_in, desc in realistic_cases:
-        h_in = CP.PropsSI('H', 'P', P_in * 1e6, 'Q', 1, 'Water')
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter('always')
-            r = _two_stage_turbine(1.0, h_in, P_in, DEFAULT_POWER_PARAMS)
-
-        x_realistic.append((desc, r['x_exit']))
-        print(f'  {desc}: x_exit = {r["x_exit"]:.3f}')
-
-        check(f'{desc}: turbine calculation succeeded', r['success'])
-        check(f'{desc}: x_exit in (0, 1)', 0.0 < r['x_exit'] < 1.0)
-
-        # Under the default threshold, these "normal" cases should
-        # usually not trigger the moisture warning.
-        moist_warns = [x for x in w if 'quality' in str(x.message).lower()
-                                  or 'moisture' in str(x.message).lower()]
-        check(f'{desc}: no moisture warning under default threshold',
-              len(moist_warns) == 0,
-              f'warnings = {[str(x.message) for x in moist_warns]}')
-
-    # Deterministic warning test:
-    # Use the 1 MPa saturated-vapor case, but temporarily tighten the
-    # threshold above its actual x_exit so that the warning must fire.
-    P_test = 1.0
-    h_test = CP.PropsSI('H', 'P', P_test * 1e6, 'Q', 1, 'Water')
-    r_base = _two_stage_turbine(1.0, h_test, P_test, DEFAULT_POWER_PARAMS)
-    x_base = r_base['x_exit']
-
-    pp_warn = dict(DEFAULT_POWER_PARAMS)
-    pp_warn['x_exit_min'] = min(0.999, x_base + 0.01)
-
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter('always')
-        r_warn = _two_stage_turbine(1.0, h_test, P_test, pp_warn)
-
-    moist_warns = [x for x in w if 'quality' in str(x.message).lower()
-                              or 'moisture' in str(x.message).lower()]
-
-    check('Forced moisture-threshold warning triggered',
-          len(moist_warns) > 0,
-          f'warnings = {[str(x.message) for x in moist_warns]}')
-    check('Forced warning case still returns success', r_warn['success'])

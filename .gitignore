@@ -1,0 +1,25 @@
+# Environments
+venv
+.venv
+
+# IDE
+.idea
+
+# Byte-compiled files
+__pycache__
+*.py[cod]
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Simulation caches written by the figure scripts
+*.pkl
+
+.DS_Store
