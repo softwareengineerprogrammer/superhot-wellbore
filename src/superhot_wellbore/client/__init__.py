@@ -5,9 +5,9 @@ superhot-wellbore Client
 
 Stable interface through which an external program obtains a
 production history from the superhot-wellbore coupled
-reservoir-wellbore model. GEOPHIRES uses it for its superhot production
-wellbore model ('Superhot Production Wellbore Model, True',
-geophires_x/SuperhotWellBores.py).
+reservoir-wellbore model. GEOPHIRES uses it for its coupled
+inflow-wellbore production wellbore model ('Production Wellbore Model, 2',
+geophires_x/CoupledWellBores.py).
 
 The core modules solve a steady-state, single self-flowing well: given
 a far-field reservoir state (pressure, temperature, transmissivity)

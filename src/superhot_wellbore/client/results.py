@@ -262,8 +262,8 @@ class ProductionProfile:
     Production history over the plant lifetime.
 
     This is the object handed to GEOPHIRES, either in process (by the
-    GEOPHIRES superhot production wellbore model) or through the files
-    written by export.py.
+    GEOPHIRES coupled inflow-wellbore production wellbore model) or
+    through the files written by export.py.
     """
 
     request: Any = None

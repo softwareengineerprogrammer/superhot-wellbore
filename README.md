@@ -66,7 +66,7 @@ superhot-wellbore/
 | `superhot_wellbore.wellbore_physics` | Wellbore pressure and enthalpy gradient integration (Eqs. 4–5 in manuscript) |
 | `superhot_wellbore.reservoir` | Radial Darcy flow model, depth–pressure scaling, and reservoir–wellbore coupling via bisection |
 | `superhot_wellbore.power_cycle` | Binary and flash power cycle analysis with Baumann wet-stage efficiency |
-| `superhot_wellbore.client` | Stable interface exposing the coupled model as a production history; used by the GEOPHIRES superhot production wellbore model |
+| `superhot_wellbore.client` | Stable interface exposing the coupled model as a production history; used by the GEOPHIRES coupled inflow-wellbore production wellbore model |
 
 ### Figure scripts
 
@@ -102,23 +102,22 @@ Results are cached as `.pkl` files to avoid rerunning simulations. Delete the ca
 
 ### GEOPHIRES
 
-[GEOPHIRES](https://github.com/NREL/GEOPHIRES-X) includes a *Superhot Production
-Wellbore Model* (`Superhot Production Wellbore Model, True`) that runs the coupled
+[GEOPHIRES](https://github.com/NREL/GEOPHIRES-X)'s *Coupled Inflow-Wellbore*
+production wellbore model (`Production Wellbore Model, 2`) runs the coupled
 inflow–wellbore model through the `superhot_wellbore.client` package alongside any
 GEOPHIRES thermal reservoir model, and then applies its own surface plant and
-economics. Install this package alongside GEOPHIRES and set the flag in the input
-file; see `example_SHR-4.txt` in the GEOPHIRES examples and the
-`geophires_x.SuperhotWellBores` docstring for the parameter mapping.
+economics. Install this package (from this branch) alongside GEOPHIRES and set the
+parameter in the input file; see `example_SHR-4.txt` in the GEOPHIRES examples and
+the `geophires_x.CoupledWellBores` docstring for the parameter mapping.
 
 ```bash
-pip install geophires-x
-pip install git+https://github.com/softwareengineerprogrammer/superhot-wellbore.git
+pip install git+https://github.com/softwareengineerprogrammer/superhot-wellbore.git@geophires-client
 ```
 
 The client also runs the package's power cycle (`power_cycle.py`) at every
 solved state, configured through the request's `power_cycle` section; the
-GEOPHIRES *Superhot Power Cycle* surface plant (`Power Plant Type, 10`) uses it
-for electricity generation.
+GEOPHIRES *Coupled Wellbore Power Cycle* surface plant (`Power Plant Type, 10`)
+uses it for electricity generation.
 
 #### Production pumping
 
