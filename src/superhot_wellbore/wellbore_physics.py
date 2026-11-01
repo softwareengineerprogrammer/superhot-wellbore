@@ -24,8 +24,9 @@ Wellbore simulator:
 Equation of state (used by this module and by reservoir.py):
     fluid_properties_Ph(pressure_MPa, enthalpy_Jkg, prev_props)
         Primary thermodynamic lookup from (P, h). Routes to IAPWS97
-        near the critical point (|P - P_crit| < 0.1 MPa), CoolProp
-        elsewhere. For viscosity, IAPWS97 has a known gap near
+        near the critical point (P_crit - 0.5 < P < P_crit + 5 MPa,
+        i.e. 21.564-27.064 MPa), CoolProp elsewhere. For viscosity,
+        IAPWS97 has a known gap near
         rho_crit; when this occurs, CoolProp's IAPWS-95 viscosity
         is used instead. Returns T, rho, mu, sound speed, phase,
         and vapor quality.
@@ -456,7 +457,8 @@ def fluid_properties_Ph(pressure_MPa, enthalpy_Jkg, prev_props=None):
 
     The routing logic is:
         1. If P is within the near-critical/pseudocritical zone
-           (21.5 < P < 27 MPa), use IAPWS97 for T, rho, and sound
+           (P_crit - 0.5 < P < P_crit + 5.0, i.e. 21.564 < P <
+           27.064 MPa), use IAPWS97 for T, rho, and sound
            speed. IAPWS97 uses explicit backward equations T(P,h)
            and v(P,h) -- direct polynomial evaluations with no
            iteration. CoolProp (IAPWS-95) must iteratively invert
@@ -1308,7 +1310,7 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
         #      apply light smoothing (10% prev, 90% new) to damp
         #      step-to-step variations where thermodynamic properties
         #      change most rapidly. This is independent of the wider
-        #      IAPWS97 routing zone (21.5-27 MPa); IAPWS97's backward
+        #      IAPWS97 routing zone (21.564-27.064 MPa); IAPWS97's backward
         #      equations are smooth internally and don't need blending.
         #   3. Normal: use EOS output directly.
         in_smoothing_zone = abs(pressure - P_CRIT_MPA) < 0.5
