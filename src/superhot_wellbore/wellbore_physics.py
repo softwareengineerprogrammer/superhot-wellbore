@@ -1082,6 +1082,11 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
          rock_temp_profile,     - [(depth, T_rock_C), ...]
          choked)                - bool: True if v > c_sound anywhere
 
+    Each entry holds the state at its own depth. The profiles start
+    at the feedzone, (depth_m, P_bottom_MPa, feedzone_enthalpy), and
+    end at the wellhead (depth 0) after depth_m / delta_z_m steps,
+    unless the march terminates early on a non-positive pressure.
+
     The choked flag indicates that the prescribed mass flow rate
     exceeds what the wellbore can sustain in steady-state flow.
     The profiles are still returned (the simulation does not
@@ -1192,6 +1197,23 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
             temperature = fluid['temperature_K']
 
         saturation = fluid['saturation']
+        T_rock_K = rock_temperatures[current_depth] + 273.15
+
+        # --- Store profiles ---
+        # The state at current_depth, before it is stepped upward, so
+        # that T, v and x are stored with the P and h they were
+        # evaluated at.
+        temperature_profile.append((current_depth, temperature - 273.15))
+        rock_temp_profile.append((current_depth, T_rock_K - 273.15))
+        pressure_profile.append((current_depth, pressure))
+        enthalpy_profile.append((current_depth, enthalpy * 1e-6))
+        velocity_profile.append((current_depth, velocity))
+        saturation_profile.append((current_depth, saturation))
+
+        if current_depth == 0:
+            # Wellhead reached: the well is integrated over exactly
+            # well_depth, so there is no step above the surface.
+            break
 
         # --- Pressure step (Eq. 4) ---
         # pressure_gradient() returns the MAGNITUDE of the pressure drop
@@ -1225,8 +1247,6 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
         # enthalpy_gradient() returns the SIGNED derivative dh/dz, which
         # is normally negative (gravity, KE, and heat loss all reduce h
         # going up). We add dh/dz * dz directly.
-        T_rock_K = rock_temperatures[current_depth] + 273.15
-
         dh_dz = enthalpy_gradient(
             temperature, T_rock_K, mass_flow_rate,
             density, drho_dz, area,
@@ -1252,14 +1272,6 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
             'sound_speed_ms': sound_speed,
             'pressure_MPa': pressure,
         }
-
-        # --- Store profiles ---
-        temperature_profile.append((current_depth, temperature - 273.15))
-        rock_temp_profile.append((current_depth, T_rock_K - 273.15))
-        pressure_profile.append((current_depth, pressure))
-        enthalpy_profile.append((current_depth, enthalpy * 1e-6))
-        velocity_profile.append((current_depth, velocity))
-        saturation_profile.append((current_depth, saturation))
 
     return (temperature_profile, pressure_profile, enthalpy_profile,
             velocity_profile, saturation_profile, rock_temp_profile,
