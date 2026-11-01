@@ -33,6 +33,8 @@ from scipy.optimize import fsolve
 
 from superhot_wellbore.wellbore_physics import (DEFAULT_WELL_PARAMS, GRAVITY,
                                                 P_CRIT_MPA,
+                                                TwoPhaseChokeWarning,
+                                                _hem_sound_speed,
                                                 _two_phase_properties,
                                                 enthalpy_gradient,
                                                 fluid_properties_Ph,
@@ -777,3 +779,164 @@ class TestNegativePressureGuard:
         Pn = _values(negative_pressure_simulation['P'])
         assert len(Pn) > 0, 'a profile was returned'
         assert all(p > 0 for p in Pn)
+
+
+# ====================================================================
+# 12. TWO-PHASE CHOKE DETECTION
+# ====================================================================
+
+def _saturation_line_hem_sound_speed(P_MPa, x):
+    """
+    c_HEM from saturation-line derivatives, independently of the
+    P-S isentrope that _hem_sound_speed() differences: in the dome,
+    s = s_f + x s_fg held constant fixes dx/dP, v = v_f + x v_fg then
+    gives (dv/dP)_s, and c^2 = -v^2 / (dv/dP)_s.
+    """
+    P = P_MPa * 1e6
+    dP = 1e-5 * P
+
+    def saturation(p):
+        return np.array([1.0 / CP.PropsSI('D', 'P', p, 'Q', 0, 'Water'),
+                         1.0 / CP.PropsSI('D', 'P', p, 'Q', 1, 'Water'),
+                         CP.PropsSI('S', 'P', p, 'Q', 0, 'Water'),
+                         CP.PropsSI('S', 'P', p, 'Q', 1, 'Water')])
+
+    v_f, v_g, s_f, s_g = saturation(P)
+    dv_f, dv_g, ds_f, ds_g = (saturation(P + dP) - saturation(P - dP)) / (2 * dP)
+    dx_dP = -(ds_f + x * (ds_g - ds_f)) / (s_g - s_f)
+    dv_dP = dv_f + x * (dv_g - dv_f) + (v_g - v_f) * dx_dP
+    v = v_f + x * (v_g - v_f)
+    return np.sqrt(-v * v / dv_dP)
+
+
+@pytest.mark.parametrize('P_MPa, x', [(0.2, 0.05), (1.0, 0.01), (1.0, 0.5),
+                                      (1.0, 0.9), (5.0, 0.1), (10.0, 0.3),
+                                      (20.0, 0.5)])
+def test_hem_sound_speed_matches_saturation_line_derivative(P_MPa, x):
+    """The isentrope difference agrees with the saturation-line form."""
+    P_Pa = P_MPa * 1e6
+    h_f = CP.PropsSI('H', 'P', P_Pa, 'Q', 0, 'Water')
+    h_g = CP.PropsSI('H', 'P', P_Pa, 'Q', 1, 'Water')
+    c = _hem_sound_speed(P_MPa, h_f + x * (h_g - h_f))
+    assert c == pytest.approx(_saturation_line_hem_sound_speed(P_MPa, x),
+                              rel=1e-3)
+
+
+def test_hem_sound_speed_is_below_both_phase_sound_speeds():
+    """
+    Phase change makes the equilibrium mixture far softer than either
+    phase: at 1 MPa and x = 0.5, c_HEM is about 320 m/s against
+    about 1400 m/s for the saturated liquid and 500 m/s for the
+    saturated vapor.
+    """
+    P_Pa = 1e6
+    h_f = CP.PropsSI('H', 'P', P_Pa, 'Q', 0, 'Water')
+    h_g = CP.PropsSI('H', 'P', P_Pa, 'Q', 1, 'Water')
+    c = _hem_sound_speed(1.0, 0.5 * (h_f + h_g))
+    assert c < CP.PropsSI('A', 'P', P_Pa, 'Q', 1, 'Water')
+    assert c < CP.PropsSI('A', 'P', P_Pa, 'Q', 0, 'Water')
+
+
+def _flashing_march(mass_flow, diagnostics=None):
+    """
+    A liquid feed that flashes on the way up and self-flows to the
+    surface: 300 C compressed liquid at 10 MPa (T_sat = 311 C) at the
+    bottom of a 2000 m, 0.217 m well, which starts to boil about 200 m
+    above the feedzone, near 8.4 MPa.
+    """
+    wp = dict(DEFAULT_WELL_PARAMS)
+    wp['depth_m'] = 2000
+    h_fz = CP.PropsSI('H', 'T', 300 + 273.15, 'P', 10e6, 'Water')
+    rock = _linear_rock_temperatures(wp['depth_m'], 300, wp['delta_z_m'])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        profiles = wellbore_simulate(10.0, h_fz, mass_flow, rock, wp,
+                                     diagnostics=diagnostics)
+    return profiles, caught
+
+
+@pytest.fixture(scope='module')
+def supersonic_flashing_march():
+    """
+    At 102.5 kg/s the mixture reaches the wellhead at about 1.3 times
+    the HEM sound speed; 102 kg/s stays just below it (about 0.97).
+    """
+    diagnostics = {}
+    profiles, caught = _flashing_march(102.5, diagnostics)
+    return profiles, caught, diagnostics
+
+
+@pytest.mark.slow
+class TestTwoPhaseChokeDetection:
+    """
+    The EOS gives no sound speed for two-phase states, so a flashing
+    well never sets the choked flag, however fast the mixture moves.
+    The march now compares the mixture velocity with the HEM sound
+    speed and reports reaching it, without changing the march or the
+    choked flag that the solvers act on.
+    """
+
+    def test_flashing_well_self_flows_to_the_surface(
+            self, supersonic_flashing_march):
+        """The case is the one targeted: liquid feed, two-phase wellhead."""
+        profiles, _, _ = supersonic_flashing_march
+        P_prof, s_prof = profiles[1], profiles[4]
+        assert np.isnan(s_prof[0][1]), 'single-phase liquid feed'
+        assert P_prof[-1][0] == 0 and P_prof[-1][1] > 0, \
+            'reaches the surface with a positive WHP'
+        assert 0 < s_prof[-1][1] < 1, 'two-phase at the wellhead'
+
+    def test_reaching_the_hem_sound_speed_is_flagged(
+            self, supersonic_flashing_march):
+        """Flag, depth and Mach number in the diagnostics dict."""
+        _, _, diagnostics = supersonic_flashing_march
+        assert diagnostics['two_phase_choked'] is True
+        assert diagnostics['two_phase_mach_max'] >= 1.0
+        assert diagnostics['two_phase_choke_depth_m'] is not None
+
+    def test_reaching_the_hem_sound_speed_is_warned_once(
+            self, supersonic_flashing_march):
+        """One TwoPhaseChokeWarning, a RuntimeWarning subclass."""
+        _, caught, _ = supersonic_flashing_march
+        hem = [w for w in caught
+               if issubclass(w.category, TwoPhaseChokeWarning)]
+        assert len(hem) == 1
+        assert issubclass(TwoPhaseChokeWarning, RuntimeWarning)
+
+    def test_choked_flag_is_unchanged(self, supersonic_flashing_march):
+        """
+        Detection only: the single-phase choked flag, which the flow
+        solvers and the client act on, is not set.
+        """
+        profiles, _, _ = supersonic_flashing_march
+        assert profiles[-1] is False
+
+    def test_detection_does_not_change_the_march(
+            self, supersonic_flashing_march):
+        """Same profiles with and without the diagnostics dict."""
+        profiles, _, _ = supersonic_flashing_march
+        plain, _ = _flashing_march(102.5)
+        for with_diag, without in zip(profiles[:6], plain[:6]):
+            np.testing.assert_array_equal(np.array(with_diag),
+                                          np.array(without))
+
+    def test_subsonic_flashing_well_is_not_flagged(self):
+        """At 90 kg/s the same well peaks near Mach 0.26."""
+        diagnostics = {}
+        profiles, caught = _flashing_march(90.0, diagnostics)
+        assert diagnostics['two_phase_choked'] is False
+        assert diagnostics['two_phase_choke_depth_m'] is None
+        assert 0 < diagnostics['two_phase_mach_max'] < 0.5
+        assert not any(issubclass(w.category, TwoPhaseChokeWarning)
+                       for w in caught)
+
+    def test_single_phase_well_has_no_two_phase_mach(self):
+        """No two-phase step, nothing to compare: Mach is NaN."""
+        diagnostics = {}
+        wp = dict(DEFAULT_WELL_PARAMS)
+        h = CP.PropsSI('H', 'T', 530 + 273.15, 'P', 16.4e6, 'Water')
+        rock = _linear_rock_temperatures(wp['depth_m'], 530,
+                                         wp['delta_z_m'])
+        wellbore_simulate(16.4, h, 20.0, rock, wp, diagnostics=diagnostics)
+        assert diagnostics['two_phase_choked'] is False
+        assert np.isnan(diagnostics['two_phase_mach_max'])
