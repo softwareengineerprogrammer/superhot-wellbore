@@ -19,18 +19,27 @@ tests evaluate the model only at the published parameters and at
 +/-5% perturbations of each; the full Nelder-Mead refit is marked
 slow.
 
-Baseline, measured on the geophires-client branch at 3be9a9d with
-CoolProp 8.0.0 and iapws 1.5.5: the WHP RMS error at (16.11 MPa,
-5318 md*m) is 0.7548 MPa, and a 5% perturbation raises it to
+Baseline, with the wellbore march integrating exactly the well depth
+(fix-k3-march-dz), CoolProp 8.0.0 and iapws 1.5.5: the WHP RMS error
+at (16.11 MPa, 5318 md*m) is 0.7551 MPa, and a 5% perturbation
+raises it to
 
-    P_res  +5%: 1.4956 MPa      P_res  -5%: 1.9119 MPa
-    k*b    +5%: 0.8065 MPa      k*b    -5%: 0.8236 MPa
+    P_res  +5%: 1.5093 MPa      P_res  -5%: 1.8694 MPa
+    k*b    +5%: 0.8134 MPa      k*b    -5%: 0.8150 MPa
 
-The refit started from the published values stays there (33
-objective evaluations, about a minute). Started instead from (15.5
-MPa, 6000 md*m) or (16.8 MPa, 4500 md*m), the same refit converges
-to (16.110 MPa, 5318 md*m) and (16.112 MPa, 5316 md*m), so the
-published values are the minimum, not an artefact of the start.
+The refit started from the published values moves to (16.109 MPa,
+5302 md*m), RMS 0.7548 MPa (36 objective evaluations, about a
+minute); started from (15.5 MPa, 6000 md*m) it converges to the same
+point (16.110 MPa, 5302 md*m), so the minimum is not an artefact of
+the start.
+
+Before that fix (geophires-client at 3be9a9d), the march integrated
+one step past the wellhead and reported each WHP 0.005-0.038 MPa
+low. The RMS error at the published values was then 0.7548 MPa
+(perturbed: 1.4956, 1.9119, 0.8065, 0.8236 MPa), and the refit
+stayed at the published values, or returned to them (within 0.002
+MPa and 2 md*m) from (15.5 MPa, 6000 md*m) and (16.8 MPa, 4500
+md*m).
 
 References
 ----------
@@ -72,7 +81,7 @@ P_RES_MPA = 16.11
 TRANSMISSIVITY_MD_M = 5318.0
 
 #: WHP RMS error [MPa] at the published calibration (see docstring)
-BASELINE_RMS_MPA = 0.7548
+BASELINE_RMS_MPA = 0.7551
 BASELINE_RMS_TOLERANCE_MPA = 1e-3
 
 
