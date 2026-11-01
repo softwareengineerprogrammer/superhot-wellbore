@@ -186,10 +186,9 @@ def _march(P_MPa, h_Jkg, mdot, rock_temperatures, well_params):
     *profiles_list, choked = wellbore_simulate(
         P_MPa, h_Jkg, mdot, rock_temperatures, well_params)
     profiles = tuple(profiles_list)
-    delta_z = _well_params(well_params)['delta_z_m']
-    # The same rule as reservoir.coupled_model(): a march that stopped
-    # more than two steps short of the surface did not reach it.
-    reached = bool(profiles[0]) and profiles[0][-1][0] <= 2 * delta_z
+    # The same rule as reservoir.coupled_model(): only a march that
+    # ends at depth 0 reached the surface.
+    reached = bool(profiles[0]) and profiles[0][-1][0] == 0
     return profiles + (choked,), reached, bool(choked)
 
 
