@@ -322,7 +322,7 @@ import warnings
 
 import numpy as np
 import CoolProp.CoolProp as CP
-from scipy.optimize import fsolve, brentq, bisect
+from scipy.optimize import brentq, bisect
 
 
 # ====================================================================
@@ -885,30 +885,46 @@ def _two_stage_turbine(m_wf, h_in, P_in_MPa, pp):
 
 def _dipippo_outlet_enthalpy(h_in, h_is_out, h_f, h_g, eta_td):
     """
-    Solve the DiPippo implicit equation for the actual turbine
-    outlet enthalpy during wet-steam expansion.
+    Actual turbine outlet enthalpy of a wet-steam expansion from a
+    saturated vapor inlet, with the Baumann moisture correction.
 
-    This equation self-consistently couples the Baumann efficiency
-    correction (which depends on outlet quality) with the enthalpy
-    balance. For a saturated vapor inlet (x_in = 1), the working
-    equation is (DiPippo, 2012, Eq. 5.15):
+    The Baumann rule (Eq. 5.12) derates the dry isentropic
+    efficiency by the average moisture of the expansion. With a
+    saturated vapor inlet (x_in = 1), the outlet state must satisfy
+
+        eta_tw = eta_td * (1 + x_out) / 2
+        h_out  = h_in - eta_tw * (h_in - h_is_out)
+        x_out  = (h_out - h_f) / h_fg,      h_fg = h_g - h_f
+
+    The outlet quality makes this look implicit in h_out, but it is
+    linear in h_out, and its solution is DiPippo (2012, Eq. 5.15):
 
         h_out = [h_in - A * (1 - h_f / h_fg)] / [1 + A / h_fg]
 
-    where:
+    with (Eq. 5.16)
 
-        A   = 0.425 * (h_in - h_is_out)    (Eq. 5.16)
-        h_fg = h_g - h_f                    (latent heat at P_cond)
+        A = (eta_td / 2) * (h_in - h_is_out)
 
-    The coefficient 0.425 = eta_td / 2 for eta_td = 0.85 arises
-    from incorporating the Baumann rule (Eq. 5.12) into the
-    isentropic efficiency definition (Eq. 5.9). The equation is
-    implicit in h_out because h_out appears on both sides through
-    the quality dependence; it is solved iteratively.
+    DiPippo writes A = 0.425 * (h_in - h_is_out), i.e. eta_td = 0.85;
+    the coefficient is written here as eta_td / 2 so that it follows
+    the eta_turbine_dry parameter. No iteration is needed.
 
-    For a wet inlet (x_in < 1), the modified form (Eq. 5.17)
-    should be used; this function handles both cases via the
-    general residual form.
+    Inlet state: Eq. 5.15 assumes a saturated vapor inlet.
+    _two_stage_turbine passes h_g at P_sat, where the isentrope of a
+    superheated inlet crosses the saturated vapor line, and passes
+    any other inlet through unchanged; the flash cycle and
+    dry_steam_specific_work give it saturated vapor at the separator
+    pressure. The one path that reaches here with another state is a
+    binary cycle whose working fluid leaves the heat exchanger below
+    saturation (possible with the defaults at a wellhead pressure
+    below about 0.68 MPa), which is outside this equation. For a wet inlet of
+    quality x_in < 1, the same derivation with eta_tw =
+    eta_td * (x_in + x_out) / 2 gives
+
+        h_out = [h_in - A * (x_in - h_f / h_fg)] / [1 + A / h_fg]
+
+    which reduces to Eq. 5.15 at x_in = 1. That case is not
+    implemented here.
 
     Parameters
     ----------
@@ -932,28 +948,19 @@ def _dipippo_outlet_enthalpy(h_in, h_is_out, h_f, h_g, eta_td):
 
     References
     ----------
-    Baumann (1921); DiPippo (2012), Eqs. 5.12-5.17, 7.7-7.11.
+    Baumann (1921); DiPippo (2012), Eqs. 5.12-5.16, 7.7-7.11.
     """
-    A = eta_td / 2.0  # = 0.425 for eta_td = 0.85
     h_fg = h_g - h_f  # latent heat at condenser pressure
 
     if h_fg <= 0:
         # Degenerate case near critical point
         return h_in - eta_td * (h_in - h_is_out)
 
-    def residual(h_c):
-        num = h_in - A * (h_in - h_c) * (1.0 - h_f / h_fg)
-        den = 1.0 + A * (h_in - h_is_out) / h_fg
-        return h_c - num / den
+    # Eq. 5.16, with DiPippo's 0.425 written as eta_td / 2
+    A = 0.5 * eta_td * (h_in - h_is_out)
 
-    h_guess = 0.5 * (h_is_out + h_f)
-
-    try:
-        h_c = fsolve(residual, h_guess, full_output=False)[0]
-        return h_c
-    except Exception:
-        # Fallback: simple isentropic efficiency without Baumann
-        return h_in - eta_td * (h_in - h_is_out)
+    # Eq. 5.15
+    return (h_in - A * (1.0 - h_f / h_fg)) / (1.0 + A / h_fg)
 
 
 # ====================================================================
