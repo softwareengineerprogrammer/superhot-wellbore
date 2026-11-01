@@ -31,6 +31,7 @@ import pytest
 from iapws import IAPWS97
 from scipy.optimize import fsolve
 
+from superhot_wellbore import wellbore_physics
 from superhot_wellbore.wellbore_physics import (DEFAULT_WELL_PARAMS, GRAVITY,
                                                 P_CRIT_MPA,
                                                 _two_phase_properties,
@@ -777,3 +778,142 @@ class TestNegativePressureGuard:
         Pn = _values(negative_pressure_simulation['P'])
         assert len(Pn) > 0, 'a profile was returned'
         assert all(p > 0 for p in Pn)
+
+
+# ====================================================================
+# 12. MARCH BOOKKEEPING
+# ====================================================================
+
+# Constant gradients for the bookkeeping march: 1 kPa/m and
+# -20 J/kg/m, so a 2000 m superheated-vapour well at 16 MPa and
+# 3.0 MJ/kg stays far from the dome and from P_crit.
+_CONSTANT_DP_DZ_PA_M = 1000.0
+_CONSTANT_DH_DZ_JKG_M = -20.0
+
+
+@pytest.fixture
+def constant_gradient_march(monkeypatch):
+    """
+    A march whose momentum and energy gradients are constants, so
+    that forward Euler is exact and the profiles are known in closed
+    form: P(d) = P_bh - |dP/dz| (depth - d), h(d) = h_fz +
+    dh/dz (depth - d).
+    """
+    monkeypatch.setattr(
+        wellbore_physics, 'pressure_gradient',
+        lambda *args, **kwargs: (_CONSTANT_DP_DZ_PA_M,
+                                 _CONSTANT_DP_DZ_PA_M, 0.0))
+    monkeypatch.setattr(
+        wellbore_physics, 'enthalpy_gradient',
+        lambda *args, **kwargs: _CONSTANT_DH_DZ_JKG_M)
+    wp = dict(DEFAULT_WELL_PARAMS)
+    wp['depth_m'] = 2000
+    return _simulate(16.0, 3.0e6, 20.0, wp, 400)
+
+
+class TestMarchIntegratesTheWellDepth:
+    """
+    The march takes depth/delta_z steps from the feedzone to the
+    wellhead, and each profile entry is the state at its own depth.
+    A march that integrates depth + delta_z (one step above the
+    surface) stores every P and h one step ahead of its depth label
+    and reports a wellhead pressure one step too low.
+    """
+
+    def test_depths_run_from_feedzone_to_wellhead(
+            self, constant_gradient_march):
+        """One entry per grid depth, feedzone first, wellhead last."""
+        depth = constant_gradient_march['well_params']['depth_m']
+        delta_z = constant_gradient_march['well_params']['delta_z_m']
+        expected = list(range(depth, -delta_z, -delta_z))
+        for name in ('T', 'P', 'h', 'v', 'saturation', 'rock'):
+            depths = [d for d, _ in constant_gradient_march[name]]
+            assert depths == expected, name
+
+    def test_wellhead_pressure_is_one_well_depth_of_gradient(
+            self, constant_gradient_march):
+        """P_wh = P_bh - |dP/dz| * depth, not * (depth + delta_z)."""
+        depth = constant_gradient_march['well_params']['depth_m']
+        whp = constant_gradient_march['P'][-1][1]
+        assert whp == pytest.approx(
+            16.0 - _CONSTANT_DP_DZ_PA_M * depth / 1e6, abs=1e-9)
+
+    def test_wellhead_enthalpy_is_one_well_depth_of_gradient(
+            self, constant_gradient_march):
+        """h_wh = h_fz + dh/dz * depth."""
+        depth = constant_gradient_march['well_params']['depth_m']
+        h_wh = constant_gradient_march['h'][-1][1]
+        assert h_wh == pytest.approx(
+            (3.0e6 + _CONSTANT_DH_DZ_JKG_M * depth) * 1e-6, abs=1e-12)
+
+    def test_every_entry_holds_the_state_at_its_depth(
+            self, constant_gradient_march):
+        """P and h at each depth label match the closed form."""
+        depth = constant_gradient_march['well_params']['depth_m']
+        for (d, P), (_, h) in zip(constant_gradient_march['P'],
+                                  constant_gradient_march['h']):
+            assert P == pytest.approx(
+                16.0 - _CONSTANT_DP_DZ_PA_M * (depth - d) / 1e6,
+                abs=1e-9), f'P at {d} m'
+            assert h == pytest.approx(
+                (3.0e6 + _CONSTANT_DH_DZ_JKG_M * (depth - d)) * 1e-6,
+                abs=1e-12), f'h at {d} m'
+
+
+def _assert_state_matches_eos(simulation):
+    """
+    Every stored T, v and x is the equation of state's value at the
+    stored (P, h) of the same entry, to round-off. Restricted to
+    entries outside the +/-0.5 MPa smoothing band around P_crit,
+    where the march deliberately blends T with the previous step.
+    """
+    area = _well_area(simulation['well_params'])
+    mdot = simulation['mass_flow']
+    n_checked = 0
+    for (d, T_C), (_, P), (_, h), (_, v), (_, x) in zip(
+            simulation['T'], simulation['P'], simulation['h'],
+            simulation['v'], simulation['saturation']):
+        if abs(P - P_CRIT_MPA) < 0.5:
+            continue
+        eos = fluid_properties_Ph(P, h * 1e6)
+        assert eos['success'], f'EOS at {d} m'
+        assert T_C == pytest.approx(eos['temperature_K'] - 273.15,
+                                    abs=1e-6), f'T at {d} m'
+        assert v == pytest.approx(mdot / (eos['density_kgm3'] * area),
+                                  rel=1e-9), f'v at {d} m'
+        if np.isnan(eos['saturation']):
+            assert np.isnan(x), f'x at {d} m'
+        else:
+            assert x == pytest.approx(eos['saturation'], abs=1e-9), \
+                f'x at {d} m'
+        n_checked += 1
+    assert n_checked > 0, 'no entries checked'
+
+
+@pytest.mark.slow
+class TestStoredStateIsSelfConsistent:
+    """
+    The march stores T, v and x from the state it is about to step
+    and P, h from the state it stepped to would leave T, v and x one
+    step behind P and h. The existing T(P, h) and continuity checks
+    allow 5 K and 5%, which a one-step lag (about 0.07 K per 10 m
+    step in these wells) passes; these checks are to round-off.
+    """
+
+    def test_profile_starts_at_the_feedzone_state(self,
+                                                  iddp_simulation):
+        """The first entry is the bottomhole (P, h) the march began at."""
+        depth = iddp_simulation['well_params']['depth_m']
+        h_fz = CP.PropsSI('H', 'T', 530 + 273.15, 'P', 16.4e6, 'Water')
+        assert iddp_simulation['P'][0] == (depth, 16.4)
+        assert iddp_simulation['h'][0][0] == depth
+        assert iddp_simulation['h'][0][1] == pytest.approx(h_fz * 1e-6,
+                                                           abs=1e-12)
+
+    def test_single_phase_state_matches_eos(self, iddp_simulation):
+        """Superheated vapour, CoolProp route."""
+        _assert_state_matches_eos(iddp_simulation)
+
+    def test_two_phase_state_matches_eos(self, dome_simulation):
+        """Through the dome: T = T_sat(P) and x = x(P, h) at each depth."""
+        _assert_state_matches_eos(dome_simulation)
