@@ -65,9 +65,10 @@ class AnalyticMarch:
     Stand-in for wellbore_simulate: an isenthalpic liquid column.
 
     Reproduces the layout of the real march (profiles of
-    (current_depth, value) from the feedzone to the surface, the
-    stored pressure being the one after each step, termination when
-    the pressure runs out) with dP/dz = rho g + friction, constant.
+    (current_depth, value) holding the state at each depth, from the
+    feedzone state to the wellhead after depth/delta_z steps,
+    termination when the pressure runs out) with dP/dz = rho g +
+    friction, constant.
     Every call is recorded so that a test can inspect the segment
     the pump stage asked for.
     """
@@ -86,10 +87,6 @@ class AnalyticMarch:
         profiles = [[] for _ in range(6)]
         for z in range(0, depth + dz, dz):
             current = depth - z
-            pressure_new = pressure - gradient
-            if pressure_new <= 0:
-                break
-            pressure = pressure_new
             T_C = fluid_properties_Ph(pressure, h_Jkg)['temperature_K'] \
                 - 273.15
             profiles[0].append((current, T_C))
@@ -98,6 +95,12 @@ class AnalyticMarch:
             profiles[3].append((current, 1.0))
             profiles[4].append((current, np.nan))
             profiles[5].append((current, rock[current]))
+            if current == 0:
+                break
+            pressure_new = pressure - gradient
+            if pressure_new <= 0:
+                break
+            pressure = pressure_new
         return tuple(profiles) + (False,)
 
 
@@ -298,10 +301,9 @@ def test_pump_pressure_meets_the_target_within_tolerance(analytic_march):
     assert abs(raw['whp_MPa'] - target) <= cfg.tolerance_MPa, \
         f"WHP {raw['whp_MPa']} vs target {target}"
     # The analytic column makes the answer explicit: the segment
-    # loses the constant gradient over z_p plus one extra step
-    # (the march stores the pressure after each step).
+    # loses the constant gradient over exactly z_p.
     z_p = raw['pump_depth_m']
-    loss = (RHO * GRAVITY + FRICTION_PA_M) * (z_p + DZ) / 1e6
+    loss = (RHO * GRAVITY + FRICTION_PA_M) * z_p / 1e6
     assert raw['dP_pump_MPa'] == pytest.approx(
         target - raw['P_pump_intake_MPa'] + loss, abs=cfg.tolerance_MPa), \
         'pump rise equals target minus intake pressure plus column loss'
