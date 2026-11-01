@@ -779,14 +779,12 @@ def coupled_model(mass_flow_rate, P_reservoir_MPa, T_reservoir_C,
         # Check that the simulation actually reached the surface.
         # If it terminated early (e.g., negative pressure at depth),
         # the profiles are truncated and the last point is NOT the
-        # wellhead. The solver must treat this as a failure.
+        # wellhead. The solver must treat this as a failure. A march
+        # that reaches the wellhead ends at depth 0, so any other
+        # last depth, however shallow, is an early termination.
         last_depth = profiles[0][-1][0]  # depth of last profile point
-        wp = dict(DEFAULT_WELL_PARAMS)
-        if well_params is not None:
-            wp.update(well_params)
-        delta_z = wp.get('delta_z_m', 10)
 
-        if last_depth > delta_z * 2:
+        if last_depth != 0:
             # Simulation terminated early -- did not reach surface
             fail['choked'] = choked
             return fail

@@ -223,6 +223,41 @@ def test_mode_never_matches_coupled_model(monkeypatch, analytic_march):
         assert raw[key] == value, f'{key}: {raw[key]!r} != {value!r}'
 
 
+def _march_ending_at(last_depth):
+    """A stand-in march whose profiles stop at last_depth [m]."""
+    def march(P_bottom_MPa, h_Jkg, mdot, rock, well_params):
+        depths = range(well_params['depth_m'], last_depth - 1,
+                       -well_params['delta_z_m'])
+        values = (T_LIQUID_C, 1.0, h_Jkg * 1e-6, 1.0, np.nan, 100.0)
+        return tuple([(d, value) for d in depths]
+                     for value in values) + (False,)
+    return march
+
+
+@pytest.mark.parametrize('last_depth, reached',
+                         [(0, True), (DZ, False), (2 * DZ, False)],
+                         ids=['ends at 0 m', 'one step short',
+                              'two steps short'])
+def test_only_a_march_that_ends_at_the_wellhead_reached_it(
+        monkeypatch, last_depth, reached):
+    """
+    A march that stops short of the surface, even by one or two
+    steps, did not reach it: its last pressure is not a wellhead
+    pressure. reservoir.coupled_model() and the pump stage apply the
+    same rule.
+    """
+    march = _march_ending_at(last_depth)
+    monkeypatch.setattr(core, 'wellbore_simulate', march)
+    monkeypatch.setattr(pump_module, 'wellbore_simulate', march)
+    wp = {'depth_m': DEPTH, 'delta_z_m': DZ, 'diameter_m': 0.217}
+    rp = {'transmissivity_md_m': 5000.0, 'drainage_radius_m': 500.0}
+    result = core.coupled_model(MDOT, 30.0, 300.0, _rock(DEPTH), rp, wp)
+    assert result['success'] is reached, 'reservoir.coupled_model'
+    _, march_reached, _ = pump_module._march(
+        20.0, _h_Jkg(T_LIQUID_C, 20.0), MDOT, _rock(DEPTH), wp)
+    assert march_reached is reached, 'pump stage'
+
+
 # ====================================================================
 # INTAKE RULE
 # ====================================================================
