@@ -334,6 +334,36 @@ class TestDiPippoOutletEnthalpy:
         x_c = (h_c - h_f) / (h_g - h_f)
         assert 0 < x_c < 1, f'x = {x_c:.3f}'
 
+    @pytest.mark.parametrize('eta_td', [0.85, 0.75], ids=['eta_td=0.85',
+                                                         'eta_td=0.75'])
+    @pytest.mark.parametrize('P_in', [1.0, 5.0, 10.0],
+                             ids=['1 MPa sat vapor',
+                                  '5 MPa sat vapor',
+                                  '10 MPa sat vapor'])
+    def test_outlet_satisfies_the_baumann_rule(self, P_in, eta_td):
+        """
+        Eq. 5.15 is the solution of the Baumann rule for a saturated
+        vapor inlet: the work is eta_td * (1 + x_out) / 2 times the
+        isentropic work, with x_out the outlet's own quality.
+        """
+        h_in, h_is, h_f, h_g, _ = _dipippo_expansion(P_in)
+        h_c = _dipippo_outlet_enthalpy(h_in, h_is, h_f, h_g, eta_td)
+        x_c = (h_c - h_f) / (h_g - h_f)
+        assert h_in - h_c == pytest.approx(
+            eta_td * (1.0 + x_c) / 2.0 * (h_in - h_is), rel=1e-12)
+
+    def test_saturated_steam_from_1_MPa_to_10_kPa(self):
+        """
+        DiPippo (2012, Eqs. 5.15-5.16) for saturated steam from 1 MPa
+        to the 10 kPa condenser: h_in = 2777.1, h_is = 2085.1,
+        h_f = 191.8 and h_g = 2583.9 kJ/kg give A = 294.1 kJ/kg,
+        h_out = 2232.1 kJ/kg and 545.0 kJ/kg of work (x_out = 0.853,
+        eta_tw = 0.787), through the turbine model the flash cycle
+        and dry_steam_specific_work use.
+        """
+        assert dry_steam_specific_work(1.0) * 1e3 == pytest.approx(
+            545.0, abs=0.5), 'kJ/kg'
+
 
 # ====================================================================
 # 5. FLASH CYCLE: MONOTONIC POWER WITH ENTHALPY
@@ -680,14 +710,14 @@ class TestDrySteamSpecificWork:
         Saturated steam expanded to 0.01 MPa gains work with inlet
         pressure until the exhaust moisture penalty (Baumann) takes
         over; with the default 0.85 dry efficiency the maximum sits
-        between 5 and 15 MPa (about 0.59 MJ/kg at 7-10 MPa), and the
+        between 5 and 15 MPa (about 0.71 MJ/kg at 7-10 MPa), and the
         work falls off towards the critical pressure.
         """
         pressures = np.array([0.5, 1.0, 2.0, 3.0, 5.0, 7.0])
         work = np.array([dry_steam_specific_work(P) for P in pressures])
         assert np.all(np.isfinite(work)), work
         assert np.all(np.diff(work) > 0), f'not monotone: {work}'
-        assert 0.3 < work[0] < 0.5 and 0.5 < work[-1] < 0.7, \
+        assert 0.3 < work[0] < 0.5 and 0.5 < work[-1] < 0.8, \
             f'plausible MJ/kg range: {work}'
         peak = max(dry_steam_specific_work(P) for P in (5.0, 7.0, 10.0, 15.0))
         assert dry_steam_specific_work(20.0) < peak, 'falls off above'
