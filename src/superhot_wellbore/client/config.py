@@ -735,7 +735,7 @@ class SolverConfig:
         Interpolating a declining reservoir's output underestimates
         it: against solving every timestep, 4, 8 and 16 solves gave
         -1.9 %, -0.4 % and -0.1 % average net power for the GEOPHIRES
-        example SHR-4 and -3.7 %, -0.8 % and -0.05 % for SHR-5, hence
+        example SHR-4 and -3.6 %, -0.9 % and -0.03 % for SHR-5, hence
         the default of 16. Placing the solves where the reservoir
         declines fastest did not do better: the output also bends
         where the wellhead phase or power cycle changes.
