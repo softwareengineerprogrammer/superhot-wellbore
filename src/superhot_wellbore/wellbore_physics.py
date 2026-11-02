@@ -147,12 +147,14 @@ The key approximations are:
        (e.g., solve_flow_for_whp) can find the maximum non-choked
        flow rate iteratively.
        The equation of state gives no sound speed for two-phase
-       states, so this flag never fires there. For those states the
-       mixture velocity is compared with the homogeneous-equilibrium
-       sound speed instead (_hem_sound_speed), and reaching it is
-       reported by a TwoPhaseChokeWarning and the optional
-       diagnostics dict, not by the choked flag: detection only, with
-       no critical-flow closure.
+       states, so for those the mixture velocity is compared with the
+       homogeneous-equilibrium sound speed instead (_hem_sound_speed),
+       the critical velocity of the homogeneous equilibrium model the
+       march itself uses. Reaching it sets the same choked flag, and
+       is also reported by a TwoPhaseChokeWarning and the optional
+       diagnostics dict. In either phase the flag is a report: there
+       is no critical-flow closure, and the prescribed flow rate is
+       marched unchanged.
 
 Future extensions
 -----------------
@@ -310,9 +312,8 @@ class TwoPhaseChokeWarning(RuntimeWarning):
     The two-phase mixture velocity reached the homogeneous-equilibrium
     sound speed (see _hem_sound_speed).
 
-    Issued by wellbore_simulate(), at most once per march. It is a
-    diagnostic: the march does not set its choked flag for it, so the
-    flow solvers and the solved flow rate are unchanged. It derives
+    Issued by wellbore_simulate(), at most once per march, which then
+    also sets its choked flag, as for a single-phase choke. It derives
     from RuntimeWarning, so the solvers' RuntimeWarning filters
     silence it during their scans, as they do the single-phase choke
     warning.
@@ -1169,8 +1170,8 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
                                       or None
             two_phase_mach_max      : float - largest v / c_HEM over
                                       the two-phase steps, NaN if none
-        The check reports only: it does not set the choked flag and
-        does not change the march.
+        A two-phase choke also sets the choked flag. The check does not
+        change the march.
 
     Returns
     -------
@@ -1181,7 +1182,11 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
          velocity_profile,      - [(depth, v_ms), ...]
          saturation_profile,    - [(depth, x), ...]
          rock_temp_profile,     - [(depth, T_rock_C), ...]
-         choked)                - bool: True if v > c_sound anywhere
+         choked)                - bool: True if the velocity reached
+                                   the local sound speed anywhere (the
+                                   EOS sound speed in single-phase
+                                   flow, the homogeneous-equilibrium
+                                   sound speed in two-phase flow)
 
     The choked flag indicates that the prescribed mass flow rate
     exceeds what the wellbore can sustain in steady-state flow.
@@ -1271,12 +1276,12 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
                     RuntimeWarning, stacklevel=2)
             choked = True
 
-        # --- Two-phase choke check (diagnostic only) ---
+        # --- Two-phase choke check ---
         # sound_speed is NaN for two-phase states, so the check above
         # never fires there. Compare the mixture velocity with the
-        # homogeneous-equilibrium sound speed instead. This reports
-        # only: it does not set `choked`, which the flow solvers and
-        # the client act on, and it does not change the march.
+        # homogeneous-equilibrium sound speed instead and set `choked`
+        # as for a single-phase choke. Like that flag, this does not
+        # change the march.
         if fluid['success'] and fluid['phase'] == 'two_phase':
             c_hem = _hem_sound_speed(pressure, enthalpy)
             if np.isfinite(c_hem):
@@ -1290,9 +1295,11 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
                         f"reaches the homogeneous-equilibrium sound speed "
                         f"({c_hem:.1f} m/s) at depth {current_depth} m: "
                         f"the flow is critical (choked) under HEM. "
-                        f"Detection only; the prescribed flow rate is "
-                        f"marched unchanged.",
+                        f"The choked flag is set; the prescribed flow "
+                        f"rate is marched unchanged.",
                         TwoPhaseChokeWarning, stacklevel=2)
+                if mach >= 1.0:
+                    choked = True
 
         # --- Property smoothing for numerical stability ---
         # Three cases:
