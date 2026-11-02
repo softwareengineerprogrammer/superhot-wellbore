@@ -1203,19 +1203,23 @@ def evaluate_at_flow_rates(flow_rates_kg_s, P_reservoir_MPa, T_reservoir_C,
 def _max_flow_from_darcy(P_reservoir_MPa, T_reservoir_C,
                         reservoir_params, well_params):
     """
-    Physics-based upper bound on mass flow rate from the Darcy equation.
+    Estimate of the maximum mass flow rate from the Darcy equation.
 
     The maximum possible flow occurs when the entire reservoir pressure
     is consumed by drawdown (P_bh -> 0). Rearranging the Darcy equation:
 
         mdot_max = 2 * pi * rho * k*b * P_res / (mu * ln(r_e / r_w))
 
-    This is an overestimate (the wellbore model will fail long before
-    P_bh = 0), but it provides a physically meaningful upper bound
-    for the flow rate search range. A safety factor of 0.8 is applied.
+    with rho and mu at the far-field state, times a factor of 0.8.
+    This is not an upper bound: bottomhole_pressure() evaluates rho
+    and mu at the feedzone temperature, where fluid that cools on its
+    way to the well can have a much larger rho/mu (1.8 times the
+    far-field value in GEOPHIRES example SHR-4). solve_flow_for_whp()
+    uses the estimate to scale its steps and probes, and
+    _max_flow_bound() to limit its search.
     The skin factor is included, and under a pseudo-pressure inflow
-    model the bound is the flow rate that draws the bottomhole
-    pressure down to the floor of the pseudo-pressure table.
+    model the estimate is 0.8 times the flow rate that draws the
+    bottomhole pressure down to the floor of the pseudo-pressure table.
 
     Returns
     -------
@@ -1249,6 +1253,69 @@ def _max_flow_from_darcy(P_reservoir_MPa, T_reservoir_C,
 
     # Apply safety factor; in practice BHP cannot go below ~1-2 MPa
     return 0.8 * mdot_max
+
+
+@functools.lru_cache(maxsize=32)
+def _upstream_rho_over_mu_max(P_reservoir_MPa, T_reservoir_C):
+    """
+    Largest rho/mu [s/m2] that the upstream inflow model can use.
+
+    bottomhole_pressure() evaluates rho and mu at the far-field pressure
+    and the feedzone temperature of its previous pass, a temperature of
+    the isenthalpic expansion of the far-field fluid. This is the
+    largest rho/mu at the far-field pressure over the range of those
+    temperatures, sampled densely; cached per reservoir state.
+    """
+    P_Pa = P_reservoir_MPa * 1e6
+    T_K = T_reservoir_C + 273.15
+    h_res = CP.PropsSI('H', 'T', T_K, 'P', P_Pa, 'Water')
+    temperatures_K = [T_K]
+    for P_MPa in np.linspace(_PSEUDO_PRESSURE_MIN_MPA, P_reservoir_MPa, 64):
+        try:
+            temperatures_K.append(
+                CP.PropsSI('T', 'P', P_MPa * 1e6, 'H', h_res, 'Water'))
+        except ValueError:
+            continue
+    best = 0.0
+    for T in np.linspace(min(temperatures_K), max(temperatures_K), 400):
+        try:
+            rho = CP.PropsSI('D', 'T', T, 'P', P_Pa, 'Water')
+            mu = CP.PropsSI('V', 'T', T, 'P', P_Pa, 'Water')
+        except ValueError:
+            continue
+        best = max(best, rho / mu)
+    return best
+
+
+def _max_flow_bound(P_reservoir_MPa, T_reservoir_C, reservoir_params,
+                    well_params):
+    """
+    Upper bound on the mass flow rate the inflow model can deliver
+    [kg/s]: above it the bottomhole pressure would be below zero.
+
+    Upstream model: the whole far-field pressure as drawdown, with the
+    largest rho/mu the model can use (_upstream_rho_over_mu_max).
+    Pseudo-pressure models: the exact flow rate that draws the
+    bottomhole pressure down to the floor of the pseudo-pressure table.
+    solve_flow_for_whp() searches up to this bound, so that a target
+    wellhead pressure reached above _max_flow_from_darcy() is found
+    rather than reported as a capacity limit.
+    """
+    params = _merge_reservoir_params(reservoir_params)
+    kb_m3 = _resolve_transmissivity(params) * MD_TO_M2
+    ln_ratio = _inflow_log_term(params, well_params)
+    if params['inflow_properties'] in ('pseudo_pressure',
+                                       'pseudo_pressure_isothermal'):
+        path = ('isothermal'
+                if params['inflow_properties'] == 'pseudo_pressure_isothermal'
+                else 'isenthalpic')
+        _, _, m = _mass_pseudo_pressure_table(float(P_reservoir_MPa),
+                                              float(T_reservoir_C), path)
+        return 2.0 * np.pi * kb_m3 * m[-1] / ln_ratio
+    rho_over_mu = _upstream_rho_over_mu_max(float(P_reservoir_MPa),
+                                            float(T_reservoir_C))
+    return (2.0 * np.pi * kb_m3 * P_reservoir_MPa * 1e6 * rho_over_mu
+            / ln_ratio)
 
 
 def _bisect_to_convergence(eval_whp, f_lo, f_hi, whp_lo, whp_hi,
@@ -1453,6 +1520,10 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
     # -----------------------------------------------------------------
     flow_max_darcy = _max_flow_from_darcy(
         P_reservoir_MPa, T_reservoir_C, reservoir_params, well_params)
+    # The far-field estimate scales the steps and probes; the search
+    # runs up to an upper bound on what the inflow model delivers.
+    flow_search_max = max(flow_max_darcy, _max_flow_bound(
+        P_reservoir_MPa, T_reservoir_C, reservoir_params, well_params))
     flow_min = max(0.1, flow_max_darcy * 0.005)
     if min_flow_kg_s is not None:
         flow_min = max(flow_min, min_flow_kg_s)
@@ -1541,7 +1612,7 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
                 break
 
     trial = f_feasible
-    while trial < flow_max_darcy:
+    while trial < flow_search_max:
         # Adaptive step: 5 kg/s normally, 1 kg/s when WHP is
         # within 2 MPa of target
         whp_current = _whp(f_feasible)
@@ -1552,7 +1623,7 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
             step = base_step
 
         trial = f_feasible + step
-        if trial > flow_max_darcy:
+        if trial > flow_search_max:
             break
 
         if _feasible(trial):
@@ -1607,7 +1678,7 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
         # flows work fine. If we find a feasible point above, extend.
         for gap_mult in [1.2, 1.5, 2.0, 3.0]:
             gap_trial = f_infeasible * gap_mult
-            if gap_trial > flow_max_darcy:
+            if gap_trial > flow_search_max:
                 break
             if _feasible(gap_trial):
                 if verbose:
@@ -1618,7 +1689,7 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
                 f_infeasible2 = None
                 for step_frac2 in [0.05, 0.1, 0.2, 0.4, 0.8]:
                     trial2 = f_feasible2 * (1 + step_frac2)
-                    if trial2 > flow_max_darcy:
+                    if trial2 > flow_search_max:
                         break
                     if _feasible(trial2):
                         f_feasible2 = trial2
