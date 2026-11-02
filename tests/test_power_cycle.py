@@ -24,10 +24,12 @@ import warnings
 import CoolProp.CoolProp as CP
 import numpy as np
 import pytest
+from scipy.optimize import brentq
 
 from superhot_wellbore.power_cycle import (DEFAULT_POWER_PARAMS,
                                            _baumann_efficiency,
                                            _dipippo_outlet_enthalpy,
+                                           _dry_stage_end_pressure,
                                            _flash_cycle, _merge_params,
                                            _two_stage_turbine,
                                            dry_steam_specific_work,
@@ -334,6 +336,36 @@ class TestDiPippoOutletEnthalpy:
         x_c = (h_c - h_f) / (h_g - h_f)
         assert 0 < x_c < 1, f'x = {x_c:.3f}'
 
+    @pytest.mark.parametrize('eta_td', [0.85, 0.75], ids=['eta_td=0.85',
+                                                         'eta_td=0.75'])
+    @pytest.mark.parametrize('P_in', [1.0, 5.0, 10.0],
+                             ids=['1 MPa sat vapor',
+                                  '5 MPa sat vapor',
+                                  '10 MPa sat vapor'])
+    def test_outlet_satisfies_the_baumann_rule(self, P_in, eta_td):
+        """
+        Eq. 5.15 is the solution of the Baumann rule for a saturated
+        vapor inlet: the work is eta_td * (1 + x_out) / 2 times the
+        isentropic work, with x_out the outlet's own quality.
+        """
+        h_in, h_is, h_f, h_g, _ = _dipippo_expansion(P_in)
+        h_c = _dipippo_outlet_enthalpy(h_in, h_is, h_f, h_g, eta_td)
+        x_c = (h_c - h_f) / (h_g - h_f)
+        assert h_in - h_c == pytest.approx(
+            eta_td * (1.0 + x_c) / 2.0 * (h_in - h_is), rel=1e-12)
+
+    def test_saturated_steam_from_1_MPa_to_10_kPa(self):
+        """
+        DiPippo (2012, Eqs. 5.15-5.16) for saturated steam from 1 MPa
+        to the 10 kPa condenser: h_in = 2777.1, h_is = 2085.1,
+        h_f = 191.8 and h_g = 2583.9 kJ/kg give A = 294.1 kJ/kg,
+        h_out = 2232.1 kJ/kg and 545.0 kJ/kg of work (x_out = 0.853,
+        eta_tw = 0.787), through the turbine model the flash cycle
+        and dry_steam_specific_work use.
+        """
+        assert dry_steam_specific_work(1.0) * 1e3 == pytest.approx(
+            545.0, abs=0.5), 'kJ/kg'
+
 
 # ====================================================================
 # 5. FLASH CYCLE: MONOTONIC POWER WITH ENTHALPY
@@ -435,6 +467,33 @@ class TestEdgeCases:
         r = power_cycle_analysis({'whp_MPa': 10.0,
                                   'h_surface_MJkg': 3.0})
         assert not r['success']
+
+    @pytest.mark.parametrize('P_whp', [0.3, 0.5],
+                             ids=['0.3 MPa wellhead', '0.5 MPa wellhead'])
+    def test_binary_working_fluid_that_cannot_boil_fails(self, P_whp):
+        """
+        A wellhead 60 kJ/kg above saturation at 0.3 or 0.5 MPa (161 or
+        178 C) selects the binary cycle, but the 1 MPa working fluid,
+        heated to 5 K below it, cannot boil (T_sat = 180 C). The cycle
+        fails and says why instead of expanding liquid.
+        """
+        h_MJkg = _h_saturated_MJkg(P_whp, 1) + 0.060
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            r = power_cycle_analysis(_mock_cm(10.0, P_whp, h_MJkg))
+        assert r['cycle'] == 'binary' and not r['success'], r
+        assert np.isnan(r['power_MWe'])
+        assert any('Binary cycle infeasible' in str(w.message)
+                   for w in caught), [str(w.message) for w in caught]
+
+    def test_binary_working_fluid_that_boils_still_runs(self):
+        """At 0.7 MPa the same superheat (190 C) boils it: the cycle runs."""
+        h_MJkg = _h_saturated_MJkg(0.7, 1) + 0.060
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            r = power_cycle_analysis(_mock_cm(10.0, 0.7, h_MJkg))
+        assert r['cycle'] == 'binary' and r['success'], r
+        assert r['power_MWe'] > 0 and r['x_exit'] > 0.85
 
 
 # ====================================================================
@@ -680,14 +739,14 @@ class TestDrySteamSpecificWork:
         Saturated steam expanded to 0.01 MPa gains work with inlet
         pressure until the exhaust moisture penalty (Baumann) takes
         over; with the default 0.85 dry efficiency the maximum sits
-        between 5 and 15 MPa (about 0.59 MJ/kg at 7-10 MPa), and the
+        between 5 and 15 MPa (about 0.71 MJ/kg at 7-10 MPa), and the
         work falls off towards the critical pressure.
         """
         pressures = np.array([0.5, 1.0, 2.0, 3.0, 5.0, 7.0])
         work = np.array([dry_steam_specific_work(P) for P in pressures])
         assert np.all(np.isfinite(work)), work
         assert np.all(np.diff(work) > 0), f'not monotone: {work}'
-        assert 0.3 < work[0] < 0.5 and 0.5 < work[-1] < 0.7, \
+        assert 0.3 < work[0] < 0.5 and 0.5 < work[-1] < 0.8, \
             f'plausible MJ/kg range: {work}'
         peak = max(dry_steam_specific_work(P) for P in (5.0, 7.0, 10.0, 15.0))
         assert dry_steam_specific_work(20.0) < peak, 'falls off above'
@@ -721,3 +780,107 @@ class TestDrySteamSpecificWork:
         base = dry_steam_specific_work(5.0)
         assert dry_steam_specific_work(5.0, {'eta_turbine_dry': 0.7}) < base
         assert dry_steam_specific_work(5.0, {'P_condenser_MPa': 0.05}) < base
+
+
+# ====================================================================
+# 9. TWO-STAGE TURBINE: DRY-STAGE LOSSES CARRIED INTO THE WET STAGE
+# ====================================================================
+
+def _superheated_inlet(T_C, P_MPa=1.0):
+    """(h, s) of a superheated turbine inlet [J/kg, J/(kg.K)]."""
+    return (CP.PropsSI('H', 'T', T_C + 273.15, 'P', P_MPa * 1e6, 'Water'),
+            CP.PropsSI('S', 'T', T_C + 273.15, 'P', P_MPa * 1e6, 'Water'))
+
+
+def _isentrope_h(s, P_MPa):
+    return CP.PropsSI('H', 'S', s, 'P', P_MPa * 1e6, 'Water')
+
+
+def _h_g(P_MPa):
+    return CP.PropsSI('H', 'P', P_MPa * 1e6, 'Q', 1, 'Water')
+
+
+class TestDryStageLossesCarriedIntoWetStage:
+    """
+    A superheated inlet expands dry at eta_td until its actual
+    expansion line meets the saturated vapor curve, and the wet stage
+    starts from that actual state. Restarting the wet stage from the
+    point where the inlet isentrope meets saturation, as before,
+    discarded the dry-stage losses (reviewer question R8).
+    """
+
+    PP = _merge_params(None)
+    ETA = DEFAULT_POWER_PARAMS['eta_turbine_dry']
+    P_COND = DEFAULT_POWER_PARAMS['P_condenser_MPa']
+
+    @pytest.mark.parametrize('T_C', [250.0, 386.0, 450.0])
+    def test_dry_stage_ends_where_the_actual_line_meets_saturation(
+            self, T_C):
+        """h_a(P_sat) = h_g(P_sat), below the isentrope's crossing."""
+        h_in, s_in = _superheated_inlet(T_C)
+        P_sat = _dry_stage_end_pressure(h_in, s_in, 1.0, self.P_COND,
+                                        self.ETA)
+        h_actual = h_in - self.ETA * (h_in - _isentrope_h(s_in, P_sat))
+        assert h_actual == pytest.approx(_h_g(P_sat), abs=1.0)
+        # the inlet isentrope is still superheated there
+        assert _isentrope_h(s_in, P_sat) < _h_g(P_sat)
+
+    @pytest.mark.parametrize('T_C', [250.0, 386.0, 450.0])
+    def test_wet_stage_starts_from_the_actual_dry_stage_exit(self, T_C):
+        """Work = dry stage to h_g(P_sat) + Eq. 5.15 from there."""
+        h_in, s_in = _superheated_inlet(T_C)
+        P_sat = _dry_stage_end_pressure(h_in, s_in, 1.0, self.P_COND,
+                                        self.ETA)
+        h_wet_in = _h_g(P_sat)
+        s_wet_in = CP.PropsSI('S', 'P', P_sat * 1e6, 'Q', 1, 'Water')
+        h_f_c = CP.PropsSI('H', 'P', self.P_COND * 1e6, 'Q', 0, 'Water')
+        h_g_c = _h_g(self.P_COND)
+        h_out = _dipippo_outlet_enthalpy(
+            h_wet_in, _isentrope_h(s_wet_in, self.P_COND), h_f_c, h_g_c,
+            self.ETA)
+        r = _two_stage_turbine(1.0, h_in, 1.0, self.PP)
+        assert r['success']
+        assert r['power_MWe'] * 1e6 == pytest.approx(h_in - h_out,
+                                                     rel=1e-9)
+        assert r['h_exit_MJkg'] * 1e6 == pytest.approx(h_out, rel=1e-9)
+
+    def test_expansion_that_stays_dry_has_no_wet_stage(self):
+        """
+        From 500 C at 1 MPa the actual line is still superheated at the
+        10 kPa condenser: the whole expansion is dry, at eta_td.
+        """
+        h_in, s_in = _superheated_inlet(500.0)
+        assert _dry_stage_end_pressure(h_in, s_in, 1.0, self.P_COND,
+                                       self.ETA) is None
+        r = _two_stage_turbine(1.0, h_in, 1.0, self.PP)
+        assert r['success'] and r['x_exit'] == 1.0
+        assert r['power_MWe'] * 1e6 == pytest.approx(
+            self.ETA * (h_in - _isentrope_h(s_in, self.P_COND)), rel=1e-9)
+
+    @pytest.mark.parametrize('T_C', [250.0, 386.0, 450.0])
+    def test_carrying_the_losses_never_loses_work(self, T_C):
+        """
+        Restarting the wet stage from the inlet isentrope (the previous
+        model) discards the dry-stage losses, so it gives less work:
+        at 386 C, 740.4 kJ/kg against 753.7 kJ/kg.
+        """
+        h_in, s_in = _superheated_inlet(T_C)
+        P_iso = brentq(lambda P: _isentrope_h(s_in, P) - _h_g(P),
+                       self.P_COND, 1.0, xtol=1e-9)
+        h_f_c = CP.PropsSI('H', 'P', self.P_COND * 1e6, 'Q', 0, 'Water')
+        h_g_c = _h_g(self.P_COND)
+        h_out_old = _dipippo_outlet_enthalpy(
+            _h_g(P_iso), _isentrope_h(s_in, self.P_COND), h_f_c, h_g_c,
+            self.ETA)
+        w_old = self.ETA * (h_in - _h_g(P_iso)) + (_h_g(P_iso) - h_out_old)
+        w_new = _two_stage_turbine(1.0, h_in, 1.0, self.PP)['power_MWe'] * 1e6
+        assert w_new >= w_old
+
+    @pytest.mark.parametrize('T_C', [200.0, 386.0, 500.0])
+    def test_exit_entropy_is_not_below_inlet_entropy(self, T_C):
+        """Second law across the whole turbine."""
+        h_in, s_in = _superheated_inlet(T_C)
+        r = _two_stage_turbine(1.0, h_in, 1.0, self.PP)
+        s_out = CP.PropsSI('S', 'H', r['h_exit_MJkg'] * 1e6,
+                           'P', self.P_COND * 1e6, 'Water')
+        assert s_out >= s_in

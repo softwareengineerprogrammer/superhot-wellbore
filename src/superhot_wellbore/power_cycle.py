@@ -127,13 +127,19 @@ inlet steam in DiPippo (2012, Ch. 7, Sec. 7.4.1, Fig. 7.12).
 
 Dry-stage work (superheated region):
 
-    W_dry = m * eta_td * (h_in - h_g(P_sat))
+    W_dry = m * eta_td * (h_in - h_s(P_sat)) = m * (h_in - h_g(P_sat))
 
-where P_sat is the pressure at which the isentropic expansion
-path crosses the saturation curve (x = 1), and eta_td is the
-dry turbine isentropic efficiency (DiPippo, 2012, Eq. 7.14).
+where h_s(P) is the enthalpy on the inlet isentrope, eta_td is
+the dry turbine isentropic efficiency (DiPippo, 2012, Eq. 7.14),
+and P_sat is the pressure at which the actual expansion line,
+h_in - eta_td * (h_in - h_s(P)), meets the saturated vapor curve
+(x = 1): moisture, and with it the Baumann penalty, starts where
+the steam actually reaches saturation, not where an isentropic
+expansion would.
 
-Wet-stage work (two-phase region):
+Wet-stage work (two-phase region), starting from that actual state,
+saturated vapor at P_sat, so that the dry-stage losses are carried
+into it:
 
     W_wet = m * (h_g(P_sat) - h_out)
 
@@ -322,7 +328,7 @@ import warnings
 
 import numpy as np
 import CoolProp.CoolProp as CP
-from scipy.optimize import fsolve, brentq, bisect
+from scipy.optimize import brentq
 
 
 # ====================================================================
@@ -638,6 +644,10 @@ def _binary_cycle(m_gf, h_gf_in, T_gf_C, P_gf_MPa, pp):
 
         m_gf * (h_gf,in - h_gf,out) = m_wf * (h_wf,out - h_wf,in)
 
+    The cycle fails (no power, with a warning) when the geofluid is
+    too cold to evaporate the working fluid at P_wf, as the flash cycle
+    does below its separation pressure.
+
     Returns dict matching power_cycle_analysis() output format.
     """
     fail = {'power_MWe': np.nan, 'cycle': 'binary', 'x_exit': np.nan,
@@ -650,6 +660,24 @@ def _binary_cycle(m_gf, h_gf_in, T_gf_C, P_gf_MPa, pp):
     P_wf = pp['P_wf_MPa']
 
     try:
+        # The working fluid must leave the heat exchanger as vapor: the
+        # turbine model expands vapor. A geofluid too cold to evaporate
+        # it at P_wf (T_wf_out at or below T_sat(P_wf)) cannot run this
+        # cycle; the turbine would otherwise be fed liquid. With the
+        # defaults this happens for a slightly superheated wellhead
+        # below about 0.68 MPa.
+        T_sat_wf_K = CP.PropsSI('T', 'P', P_wf * 1e6, 'Q', 1, 'Water')
+        if T_wf_out_K <= T_sat_wf_K:
+            warnings.warn(
+                f"Binary cycle infeasible: the working fluid at "
+                f"{P_wf:.2f} MPa boils at {T_sat_wf_K - 273.15:.1f} C, "
+                f"but leaves the heat exchanger at "
+                f"{T_wf_out_K - 273.15:.1f} C (geofluid {T_gf_C:.1f} C "
+                f"less the {pp['delta_T_pinch_C']:g} K pinch), so it "
+                f"would reach the turbine as liquid.",
+                RuntimeWarning, stacklevel=3)
+            return fail
+
         # Geofluid outlet enthalpy at rejection temperature
         h_gf_out = CP.PropsSI('H', 'T', T_reject_K,
                               'P', P_gf_MPa * 1e6, 'Water')
@@ -755,14 +783,18 @@ def _two_stage_turbine(m_wf, h_in, P_in_MPa, pp):
     Sec. 7.4.1, Fig. 7.12):
 
     Stage 1 (dry, Eq. 7.14):
-        Isentropic expansion from superheated inlet to the pressure
-        P_sat where the expansion path first intersects the
-        saturated vapor curve (x = 1). The dry turbine efficiency
-        eta_td is applied directly.
+        Expansion at the dry efficiency eta_td from the superheated
+        inlet to the pressure P_sat at which the actual expansion
+        line, h_in - eta_td * (h_in - h_s(P)), meets the saturated
+        vapor curve (x = 1). If it stays above that curve down to
+        the condenser, the whole expansion is dry.
 
     Stage 2 (wet, Eqs. 7.10-7.11 / 5.15-5.16):
-        Expansion from P_sat to P_condenser through the two-phase
-        region. The actual outlet enthalpy h_out is determined by
+        Expansion from the actual dry-stage exit state, saturated
+        vapor at P_sat, to P_condenser through the two-phase region.
+        The dry-stage losses are therefore carried into the wet
+        stage rather than discarded by restarting it from the inlet
+        isentrope. The actual outlet enthalpy h_out is determined by
         the DiPippo implicit equation, which self-consistently
         embeds the Baumann wet-efficiency correction through the
         coefficient A = eta_td / 2. No additional efficiency factor
@@ -807,22 +839,38 @@ def _two_stage_turbine(m_wf, h_in, P_in_MPa, pp):
         if h_in > h_sat_vap_inlet + _TURBINE_SUPERHEAT_TOL_Jkg:
             # --- SUPERHEATED INLET: dry + wet stages ---
             # (DiPippo, 2012, Ch. 7, Sec. 7.4.1, Fig. 7.12)
-            P_sat = _find_saturation_pressure(s_in, P_in_MPa, P_cond)
-
-            h_sat = CP.PropsSI('H', 'P', P_sat * 1e6, 'Q', 1,
-                               'Water')
-            # Dry-stage work (DiPippo, 2012, Eq. 7.14)
-            w_dry = eta_td * (h_in - h_sat)  # J/kg
+            P_sat = _dry_stage_end_pressure(h_in, s_in, P_in_MPa,
+                                            P_cond, eta_td)
+            if P_sat is None:
+                # The actual expansion stays dry down to the condenser
+                h_dry_out = h_in - eta_td * (
+                    h_in - CP.PropsSI('H', 'S', s_in,
+                                      'P', P_cond * 1e6, 'Water'))
+                P_sat = P_cond
+                h_sat = h_dry_out
+                s_wet = CP.PropsSI('S', 'H', h_dry_out,
+                                   'P', P_cond * 1e6, 'Water')
+            else:
+                # Wet stage starts from the actual dry-stage exit:
+                # saturated vapor at P_sat
+                h_sat = CP.PropsSI('H', 'P', P_sat * 1e6, 'Q', 1,
+                                   'Water')
+                s_wet = CP.PropsSI('S', 'P', P_sat * 1e6, 'Q', 1,
+                                   'Water')
+            # Dry-stage work (DiPippo, 2012, Eq. 7.14):
+            # eta_td * (h_in - h_s(P_sat)), which is h_in - h_sat
+            w_dry = h_in - h_sat  # J/kg
         else:
             # --- TWO-PHASE INLET: wet stage only ---
             P_sat = P_in_MPa
             h_sat = h_in
+            s_wet = s_in
             w_dry = 0.0
 
         # --- WET STAGE ---
-        # Isentropic outlet state at condenser pressure
-        # (DiPippo, 2012, Eq. 5.14 / 7.9)
-        h_is_out = CP.PropsSI('H', 'S', s_in,
+        # Isentropic outlet state at condenser pressure, from the
+        # wet-stage inlet (DiPippo, 2012, Eq. 5.14 / 7.9)
+        h_is_out = CP.PropsSI('H', 'S', s_wet,
                               'P', P_cond * 1e6, 'Water')
 
         # Saturation properties at condenser pressure
@@ -885,30 +933,46 @@ def _two_stage_turbine(m_wf, h_in, P_in_MPa, pp):
 
 def _dipippo_outlet_enthalpy(h_in, h_is_out, h_f, h_g, eta_td):
     """
-    Solve the DiPippo implicit equation for the actual turbine
-    outlet enthalpy during wet-steam expansion.
+    Actual turbine outlet enthalpy of a wet-steam expansion from a
+    saturated vapor inlet, with the Baumann moisture correction.
 
-    This equation self-consistently couples the Baumann efficiency
-    correction (which depends on outlet quality) with the enthalpy
-    balance. For a saturated vapor inlet (x_in = 1), the working
-    equation is (DiPippo, 2012, Eq. 5.15):
+    The Baumann rule (Eq. 5.12) derates the dry isentropic
+    efficiency by the average moisture of the expansion. With a
+    saturated vapor inlet (x_in = 1), the outlet state must satisfy
+
+        eta_tw = eta_td * (1 + x_out) / 2
+        h_out  = h_in - eta_tw * (h_in - h_is_out)
+        x_out  = (h_out - h_f) / h_fg,      h_fg = h_g - h_f
+
+    The outlet quality makes this look implicit in h_out, but it is
+    linear in h_out, and its solution is DiPippo (2012, Eq. 5.15):
 
         h_out = [h_in - A * (1 - h_f / h_fg)] / [1 + A / h_fg]
 
-    where:
+    with (Eq. 5.16)
 
-        A   = 0.425 * (h_in - h_is_out)    (Eq. 5.16)
-        h_fg = h_g - h_f                    (latent heat at P_cond)
+        A = (eta_td / 2) * (h_in - h_is_out)
 
-    The coefficient 0.425 = eta_td / 2 for eta_td = 0.85 arises
-    from incorporating the Baumann rule (Eq. 5.12) into the
-    isentropic efficiency definition (Eq. 5.9). The equation is
-    implicit in h_out because h_out appears on both sides through
-    the quality dependence; it is solved iteratively.
+    DiPippo writes A = 0.425 * (h_in - h_is_out), i.e. eta_td = 0.85;
+    the coefficient is written here as eta_td / 2 so that it follows
+    the eta_turbine_dry parameter. No iteration is needed.
 
-    For a wet inlet (x_in < 1), the modified form (Eq. 5.17)
-    should be used; this function handles both cases via the
-    general residual form.
+    Inlet state: Eq. 5.15 assumes a saturated vapor inlet.
+    _two_stage_turbine passes h_g at P_sat, where the isentrope of a
+    superheated inlet crosses the saturated vapor line, and passes
+    any other inlet through unchanged; the flash cycle and
+    dry_steam_specific_work give it saturated vapor at the separator
+    pressure. The one path that reaches here with another state is a
+    binary cycle whose working fluid leaves the heat exchanger below
+    saturation (possible with the defaults at a wellhead pressure
+    below about 0.68 MPa), which is outside this equation. For a wet inlet of
+    quality x_in < 1, the same derivation with eta_tw =
+    eta_td * (x_in + x_out) / 2 gives
+
+        h_out = [h_in - A * (x_in - h_f / h_fg)] / [1 + A / h_fg]
+
+    which reduces to Eq. 5.15 at x_in = 1. That case is not
+    implemented here.
 
     Parameters
     ----------
@@ -932,28 +996,19 @@ def _dipippo_outlet_enthalpy(h_in, h_is_out, h_f, h_g, eta_td):
 
     References
     ----------
-    Baumann (1921); DiPippo (2012), Eqs. 5.12-5.17, 7.7-7.11.
+    Baumann (1921); DiPippo (2012), Eqs. 5.12-5.16, 7.7-7.11.
     """
-    A = eta_td / 2.0  # = 0.425 for eta_td = 0.85
     h_fg = h_g - h_f  # latent heat at condenser pressure
 
     if h_fg <= 0:
         # Degenerate case near critical point
         return h_in - eta_td * (h_in - h_is_out)
 
-    def residual(h_c):
-        num = h_in - A * (h_in - h_c) * (1.0 - h_f / h_fg)
-        den = 1.0 + A * (h_in - h_is_out) / h_fg
-        return h_c - num / den
+    # Eq. 5.16, with DiPippo's 0.425 written as eta_td / 2
+    A = 0.5 * eta_td * (h_in - h_is_out)
 
-    h_guess = 0.5 * (h_is_out + h_f)
-
-    try:
-        h_c = fsolve(residual, h_guess, full_output=False)[0]
-        return h_c
-    except Exception:
-        # Fallback: simple isentropic efficiency without Baumann
-        return h_in - eta_td * (h_in - h_is_out)
+    # Eq. 5.15
+    return (h_in - A * (1.0 - h_f / h_fg)) / (1.0 + A / h_fg)
 
 
 # ====================================================================
@@ -1004,57 +1059,55 @@ def _baumann_efficiency(eta_td, x_outlet):
 # SATURATION PRESSURE FINDER
 # ====================================================================
 
-def _find_saturation_pressure(s_in, P_in_MPa, P_out_MPa):
+def _dry_stage_end_pressure(h_in, s_in, P_in_MPa, P_out_MPa, eta_td):
     """
-    Find the pressure at which an isentropic expansion from P_in
-    first crosses the saturated vapor curve (x = 1).
+    Pressure at which the actual expansion line of a superheated
+    inlet meets the saturated vapor curve (x = 1).
 
-    This defines the boundary between the dry and wet expansion
-    stages for a superheated inlet (DiPippo, 2012, Ch. 7,
-    Fig. 7.12). Uses Brent's method with bisection fallback.
+    The dry stage expands at the dry efficiency eta_td, so its actual
+    enthalpy at a pressure P is
+
+        h_a(P) = h_in - eta_td * (h_in - h_s(P))
+
+    with h_s(P) the enthalpy on the inlet isentrope. Moisture forms
+    where h_a(P) = h_g(P), which is therefore the boundary between the
+    dry and the wet stage (DiPippo, 2012, Ch. 7, Fig. 7.12, with the
+    dry-stage losses carried along). The actual line lies above the
+    isentrope, so it reaches saturation at a lower pressure than an
+    isentropic expansion would.
 
     Parameters
     ----------
+    h_in : float
+        Inlet enthalpy [J/kg], superheated at P_in_MPa.
     s_in : float
         Inlet entropy [J/(kg.K)].
     P_in_MPa : float
-        Inlet (upper) pressure bound [MPa].
+        Inlet pressure [MPa].
     P_out_MPa : float
-        Outlet (lower) pressure bound [MPa].
+        Outlet (condenser) pressure [MPa].
+    eta_td : float
+        Dry turbine isentropic efficiency [-].
 
     Returns
     -------
-    float
-        Saturation pressure P_sat [MPa].
+    float or None
+        P_sat [MPa] (Brent's method), or None if the actual expansion
+        is still dry at P_out_MPa, h_a(P_out) >= h_g(P_out).
+        A failed property lookup raises; _two_stage_turbine() then
+        reports a failed expansion.
     """
-    P_crit = 22.064  # MPa
-    P_lo = max(P_out_MPa, 0.01)
-    P_hi = min(P_in_MPa, P_crit * 0.98)
+    P_hi = min(P_in_MPa, _P_CRIT_MPa * 0.98)
 
-    if P_hi <= P_lo:
-        return 0.5 * (P_lo + P_hi)
+    def excess(P):
+        """h_a(P) - h_g(P) [J/kg]."""
+        h_s = CP.PropsSI('H', 'S', s_in, 'P', P * 1e6, 'Water')
+        h_g = CP.PropsSI('H', 'P', P * 1e6, 'Q', 1, 'Water')
+        return h_in - eta_td * (h_in - h_s) - h_g
 
-    def f(P):
-        """h_isentropic(P) - h_sat_vapor(P)."""
-        try:
-            h_is = CP.PropsSI('H', 'S', s_in, 'P', P * 1e6,
-                              'Water')
-            h_sv = CP.PropsSI('H', 'P', P * 1e6, 'Q', 1,
-                              'Water')
-            return h_is - h_sv
-        except Exception:
-            return np.inf
-
-    try:
-        f_lo, f_hi = f(P_lo), f(P_hi)
-        if np.isinf(f_lo) or np.isinf(f_hi) or f_lo * f_hi > 0:
-            return P_lo + 0.6 * (P_hi - P_lo)
-        return brentq(f, P_lo, P_hi, xtol=1e-5)
-    except Exception:
-        try:
-            return bisect(f, P_lo, P_hi, xtol=1e-4)
-        except Exception:
-            return P_lo + 0.6 * (P_hi - P_lo)
+    if excess(P_out_MPa) >= 0.0:
+        return None
+    return brentq(excess, P_out_MPa, P_hi, xtol=1e-7)
 
 
 # ====================================================================

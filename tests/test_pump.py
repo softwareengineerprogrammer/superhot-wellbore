@@ -65,9 +65,10 @@ class AnalyticMarch:
     Stand-in for wellbore_simulate: an isenthalpic liquid column.
 
     Reproduces the layout of the real march (profiles of
-    (current_depth, value) from the feedzone to the surface, the
-    stored pressure being the one after each step, termination when
-    the pressure runs out) with dP/dz = rho g + friction, constant.
+    (current_depth, value) holding the state at each depth, from the
+    feedzone state to the wellhead after depth/delta_z steps,
+    termination when the pressure runs out) with dP/dz = rho g +
+    friction, constant.
     Every call is recorded so that a test can inspect the segment
     the pump stage asked for.
     """
@@ -86,10 +87,6 @@ class AnalyticMarch:
         profiles = [[] for _ in range(6)]
         for z in range(0, depth + dz, dz):
             current = depth - z
-            pressure_new = pressure - gradient
-            if pressure_new <= 0:
-                break
-            pressure = pressure_new
             T_C = fluid_properties_Ph(pressure, h_Jkg)['temperature_K'] \
                 - 273.15
             profiles[0].append((current, T_C))
@@ -98,6 +95,12 @@ class AnalyticMarch:
             profiles[3].append((current, 1.0))
             profiles[4].append((current, np.nan))
             profiles[5].append((current, rock[current]))
+            if current == 0:
+                break
+            pressure_new = pressure - gradient
+            if pressure_new <= 0:
+                break
+            pressure = pressure_new
         return tuple(profiles) + (False,)
 
 
@@ -220,6 +223,41 @@ def test_mode_never_matches_coupled_model(monkeypatch, analytic_march):
         assert raw[key] == value, f'{key}: {raw[key]!r} != {value!r}'
 
 
+def _march_ending_at(last_depth):
+    """A stand-in march whose profiles stop at last_depth [m]."""
+    def march(P_bottom_MPa, h_Jkg, mdot, rock, well_params):
+        depths = range(well_params['depth_m'], last_depth - 1,
+                       -well_params['delta_z_m'])
+        values = (T_LIQUID_C, 1.0, h_Jkg * 1e-6, 1.0, np.nan, 100.0)
+        return tuple([(d, value) for d in depths]
+                     for value in values) + (False,)
+    return march
+
+
+@pytest.mark.parametrize('last_depth, reached',
+                         [(0, True), (DZ, False), (2 * DZ, False)],
+                         ids=['ends at 0 m', 'one step short',
+                              'two steps short'])
+def test_only_a_march_that_ends_at_the_wellhead_reached_it(
+        monkeypatch, last_depth, reached):
+    """
+    A march that stops short of the surface, even by one or two
+    steps, did not reach it: its last pressure is not a wellhead
+    pressure. reservoir.coupled_model() and the pump stage apply the
+    same rule.
+    """
+    march = _march_ending_at(last_depth)
+    monkeypatch.setattr(core, 'wellbore_simulate', march)
+    monkeypatch.setattr(pump_module, 'wellbore_simulate', march)
+    wp = {'depth_m': DEPTH, 'delta_z_m': DZ, 'diameter_m': 0.217}
+    rp = {'transmissivity_md_m': 5000.0, 'drainage_radius_m': 500.0}
+    result = core.coupled_model(MDOT, 30.0, 300.0, _rock(DEPTH), rp, wp)
+    assert result['success'] is reached, 'reservoir.coupled_model'
+    _, march_reached, _ = pump_module._march(
+        20.0, _h_Jkg(T_LIQUID_C, 20.0), MDOT, _rock(DEPTH), wp)
+    assert march_reached is reached, 'pump stage'
+
+
 # ====================================================================
 # INTAKE RULE
 # ====================================================================
@@ -298,10 +336,9 @@ def test_pump_pressure_meets_the_target_within_tolerance(analytic_march):
     assert abs(raw['whp_MPa'] - target) <= cfg.tolerance_MPa, \
         f"WHP {raw['whp_MPa']} vs target {target}"
     # The analytic column makes the answer explicit: the segment
-    # loses the constant gradient over z_p plus one extra step
-    # (the march stores the pressure after each step).
+    # loses the constant gradient over exactly z_p.
     z_p = raw['pump_depth_m']
-    loss = (RHO * GRAVITY + FRICTION_PA_M) * (z_p + DZ) / 1e6
+    loss = (RHO * GRAVITY + FRICTION_PA_M) * z_p / 1e6
     assert raw['dP_pump_MPa'] == pytest.approx(
         target - raw['P_pump_intake_MPa'] + loss, abs=cfg.tolerance_MPa), \
         'pump rise equals target minus intake pressure plus column loss'

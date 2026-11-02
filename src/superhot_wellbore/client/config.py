@@ -94,6 +94,11 @@ HOLD_MODES = ('whp', 'flow')
 # Inflow models recognised by ReservoirConfig
 INFLOW_MODES = ('darcy', 'prescribed')
 
+# Fluid-property models of the Darcy inflow (ReservoirConfig.
+# inflow_properties); the same tuple as reservoir.INFLOW_PROPERTY_MODELS
+INFLOW_PROPERTY_MODES = ('upstream', 'pseudo_pressure',
+                         'pseudo_pressure_isothermal')
+
 # Production pump modes recognised by PumpConfig
 PUMP_MODES = ('never', 'auto', 'always')
 
@@ -262,6 +267,17 @@ class ReservoirConfig:
                        far-field pressure the reported reservoir
                        drawdown refers to, and T_reservoir_C the
                        formation temperature profile.
+    inflow_properties : str
+        Fluid properties of the Darcy inflow (INFLOW_PROPERTY_MODES;
+        see reservoir.bottomhole_pressure()): 'upstream' (far-field
+        pressure and feedzone temperature, the default), or the mass
+        pseudo-pressure along the isenthalpic ('pseudo_pressure') or
+        isothermal ('pseudo_pressure_isothermal') path.
+    skin : float
+        Skin factor S [-] of the Darcy inflow, added to
+        ln(r_e / r_w): positive for a damaged, negative for a
+        stimulated near-well zone; a vertical fracture of half-length
+        x_f gives S = ln(2 r_w / x_f).
     """
 
     P_reservoir_MPa: float = 30.0
@@ -271,6 +287,8 @@ class ReservoirConfig:
     thickness_m: Optional[float] = None
     drainage_radius_m: float = 500.0
     inflow: str = 'darcy'
+    inflow_properties: str = 'upstream'
+    skin: float = 0.0
 
     def to_reservoir_params(self):
         """
@@ -279,10 +297,13 @@ class ReservoirConfig:
         Returns
         -------
         dict
-            Keys 'drainage_radius_m' plus either 'transmissivity_md_m'
-            or 'permeability_md' and 'thickness_m'.
+            Keys 'drainage_radius_m', 'inflow_properties' and 'skin',
+            plus either 'transmissivity_md_m' or 'permeability_md' and
+            'thickness_m'.
         """
-        params = {'drainage_radius_m': self.drainage_radius_m}
+        params = {'drainage_radius_m': self.drainage_radius_m,
+                  'inflow_properties': self.inflow_properties,
+                  'skin': self.skin}
         if self.transmissivity_md_m is not None:
             params['transmissivity_md_m'] = self.transmissivity_md_m
         else:
@@ -302,6 +323,12 @@ class ReservoirConfig:
             raise ValueError(
                 f'Unknown inflow mode {self.inflow!r}. Valid modes: '
                 f'{", ".join(INFLOW_MODES)}')
+        if self.inflow_properties not in INFLOW_PROPERTY_MODES:
+            raise ValueError(
+                f'Unknown inflow_properties {self.inflow_properties!r}. '
+                f'Valid models: {", ".join(INFLOW_PROPERTY_MODES)}')
+        if not np.isfinite(self.skin):
+            raise ValueError('skin must be finite')
         if self.inflow == 'darcy' and self.transmissivity_md_m is None:
             if self.permeability_md is None or self.thickness_m is None:
                 raise ValueError(
@@ -705,6 +732,13 @@ class SolverConfig:
         evenly spaced subset of times and the results are linearly
         interpolated onto the full time vector. Each solve costs
         seconds, so this bounds the runtime of a long project life.
+        Interpolating a declining reservoir's output underestimates
+        it: against solving every timestep, 4, 8 and 16 solves gave
+        -1.9 %, -0.4 % and -0.1 % average net power for the GEOPHIRES
+        example SHR-4 and -3.6 %, -0.9 % and -0.03 % for SHR-5, hence
+        the default of 16. Placing the solves where the reservoir
+        declines fastest did not do better: the output also bends
+        where the wellhead phase or power cycle changes.
         Set to 0 or a negative value to solve at every timestep.
     reuse_previous_solution : bool
         Pass the previous converged solution to
@@ -718,7 +752,7 @@ class SolverConfig:
     """
 
     tolerance_MPa: float = 0.15
-    max_solve_points: int = 8
+    max_solve_points: int = 16
     reuse_previous_solution: bool = True
     strict: bool = False
     verbose: bool = False

@@ -31,8 +31,11 @@ import pytest
 from iapws import IAPWS97
 from scipy.optimize import fsolve
 
+from superhot_wellbore import wellbore_physics
 from superhot_wellbore.wellbore_physics import (DEFAULT_WELL_PARAMS, GRAVITY,
                                                 P_CRIT_MPA,
+                                                TwoPhaseChokeWarning,
+                                                _hem_sound_speed,
                                                 _two_phase_properties,
                                                 enthalpy_gradient,
                                                 fluid_properties_Ph,
@@ -777,3 +780,304 @@ class TestNegativePressureGuard:
         Pn = _values(negative_pressure_simulation['P'])
         assert len(Pn) > 0, 'a profile was returned'
         assert all(p > 0 for p in Pn)
+
+
+# ====================================================================
+# 12. MARCH BOOKKEEPING
+# ====================================================================
+
+# Constant gradients for the bookkeeping march: 1 kPa/m and
+# -20 J/kg/m, so a 2000 m superheated-vapour well at 16 MPa and
+# 3.0 MJ/kg stays far from the dome and from P_crit.
+_CONSTANT_DP_DZ_PA_M = 1000.0
+_CONSTANT_DH_DZ_JKG_M = -20.0
+
+
+@pytest.fixture
+def constant_gradient_march(monkeypatch):
+    """
+    A march whose momentum and energy gradients are constants, so
+    that forward Euler is exact and the profiles are known in closed
+    form: P(d) = P_bh - |dP/dz| (depth - d), h(d) = h_fz +
+    dh/dz (depth - d).
+    """
+    monkeypatch.setattr(
+        wellbore_physics, 'pressure_gradient',
+        lambda *args, **kwargs: (_CONSTANT_DP_DZ_PA_M,
+                                 _CONSTANT_DP_DZ_PA_M, 0.0))
+    monkeypatch.setattr(
+        wellbore_physics, 'enthalpy_gradient',
+        lambda *args, **kwargs: _CONSTANT_DH_DZ_JKG_M)
+    wp = dict(DEFAULT_WELL_PARAMS)
+    wp['depth_m'] = 2000
+    return _simulate(16.0, 3.0e6, 20.0, wp, 400)
+
+
+class TestMarchIntegratesTheWellDepth:
+    """
+    The march takes depth/delta_z steps from the feedzone to the
+    wellhead, and each profile entry is the state at its own depth.
+    A march that integrates depth + delta_z (one step above the
+    surface) stores every P and h one step ahead of its depth label
+    and reports a wellhead pressure one step too low.
+    """
+
+    def test_depths_run_from_feedzone_to_wellhead(
+            self, constant_gradient_march):
+        """One entry per grid depth, feedzone first, wellhead last."""
+        depth = constant_gradient_march['well_params']['depth_m']
+        delta_z = constant_gradient_march['well_params']['delta_z_m']
+        expected = list(range(depth, -delta_z, -delta_z))
+        for name in ('T', 'P', 'h', 'v', 'saturation', 'rock'):
+            depths = [d for d, _ in constant_gradient_march[name]]
+            assert depths == expected, name
+
+    def test_wellhead_pressure_is_one_well_depth_of_gradient(
+            self, constant_gradient_march):
+        """P_wh = P_bh - |dP/dz| * depth, not * (depth + delta_z)."""
+        depth = constant_gradient_march['well_params']['depth_m']
+        whp = constant_gradient_march['P'][-1][1]
+        assert whp == pytest.approx(
+            16.0 - _CONSTANT_DP_DZ_PA_M * depth / 1e6, abs=1e-9)
+
+    def test_wellhead_enthalpy_is_one_well_depth_of_gradient(
+            self, constant_gradient_march):
+        """h_wh = h_fz + dh/dz * depth."""
+        depth = constant_gradient_march['well_params']['depth_m']
+        h_wh = constant_gradient_march['h'][-1][1]
+        assert h_wh == pytest.approx(
+            (3.0e6 + _CONSTANT_DH_DZ_JKG_M * depth) * 1e-6, abs=1e-12)
+
+    def test_every_entry_holds_the_state_at_its_depth(
+            self, constant_gradient_march):
+        """P and h at each depth label match the closed form."""
+        depth = constant_gradient_march['well_params']['depth_m']
+        for (d, P), (_, h) in zip(constant_gradient_march['P'],
+                                  constant_gradient_march['h']):
+            assert P == pytest.approx(
+                16.0 - _CONSTANT_DP_DZ_PA_M * (depth - d) / 1e6,
+                abs=1e-9), f'P at {d} m'
+            assert h == pytest.approx(
+                (3.0e6 + _CONSTANT_DH_DZ_JKG_M * (depth - d)) * 1e-6,
+                abs=1e-12), f'h at {d} m'
+
+
+def _assert_state_matches_eos(simulation):
+    """
+    Every stored T, v and x is the equation of state's value at the
+    stored (P, h) of the same entry, to round-off. Restricted to
+    entries outside the +/-0.5 MPa smoothing band around P_crit,
+    where the march deliberately blends T with the previous step.
+    """
+    area = _well_area(simulation['well_params'])
+    mdot = simulation['mass_flow']
+    n_checked = 0
+    for (d, T_C), (_, P), (_, h), (_, v), (_, x) in zip(
+            simulation['T'], simulation['P'], simulation['h'],
+            simulation['v'], simulation['saturation']):
+        if abs(P - P_CRIT_MPA) < 0.5:
+            continue
+        eos = fluid_properties_Ph(P, h * 1e6)
+        assert eos['success'], f'EOS at {d} m'
+        assert T_C == pytest.approx(eos['temperature_K'] - 273.15,
+                                    abs=1e-6), f'T at {d} m'
+        assert v == pytest.approx(mdot / (eos['density_kgm3'] * area),
+                                  rel=1e-9), f'v at {d} m'
+        if np.isnan(eos['saturation']):
+            assert np.isnan(x), f'x at {d} m'
+        else:
+            assert x == pytest.approx(eos['saturation'], abs=1e-9), \
+                f'x at {d} m'
+        n_checked += 1
+    assert n_checked > 0, 'no entries checked'
+
+
+@pytest.mark.slow
+class TestStoredStateIsSelfConsistent:
+    """
+    The march stores T, v and x from the state it is about to step
+    and P, h from the state it stepped to would leave T, v and x one
+    step behind P and h. The existing T(P, h) and continuity checks
+    allow 5 K and 5%, which a one-step lag (about 0.07 K per 10 m
+    step in these wells) passes; these checks are to round-off.
+    """
+
+    def test_profile_starts_at_the_feedzone_state(self,
+                                                  iddp_simulation):
+        """The first entry is the bottomhole (P, h) the march began at."""
+        depth = iddp_simulation['well_params']['depth_m']
+        h_fz = CP.PropsSI('H', 'T', 530 + 273.15, 'P', 16.4e6, 'Water')
+        assert iddp_simulation['P'][0] == (depth, 16.4)
+        assert iddp_simulation['h'][0][0] == depth
+        assert iddp_simulation['h'][0][1] == pytest.approx(h_fz * 1e-6,
+                                                           abs=1e-12)
+
+    def test_single_phase_state_matches_eos(self, iddp_simulation):
+        """Superheated vapour, CoolProp route."""
+        _assert_state_matches_eos(iddp_simulation)
+
+    def test_two_phase_state_matches_eos(self, dome_simulation):
+        """Through the dome: T = T_sat(P) and x = x(P, h) at each depth."""
+        _assert_state_matches_eos(dome_simulation)
+
+
+# ====================================================================
+# 13. TWO-PHASE CHOKE DETECTION
+# ====================================================================
+
+def _saturation_line_hem_sound_speed(P_MPa, x):
+    """
+    c_HEM from saturation-line derivatives, independently of the
+    P-S isentrope that _hem_sound_speed() differences: in the dome,
+    s = s_f + x s_fg held constant fixes dx/dP, v = v_f + x v_fg then
+    gives (dv/dP)_s, and c^2 = -v^2 / (dv/dP)_s.
+    """
+    P = P_MPa * 1e6
+    dP = 1e-5 * P
+
+    def saturation(p):
+        return np.array([1.0 / CP.PropsSI('D', 'P', p, 'Q', 0, 'Water'),
+                         1.0 / CP.PropsSI('D', 'P', p, 'Q', 1, 'Water'),
+                         CP.PropsSI('S', 'P', p, 'Q', 0, 'Water'),
+                         CP.PropsSI('S', 'P', p, 'Q', 1, 'Water')])
+
+    v_f, v_g, s_f, s_g = saturation(P)
+    dv_f, dv_g, ds_f, ds_g = (saturation(P + dP) - saturation(P - dP)) / (2 * dP)
+    dx_dP = -(ds_f + x * (ds_g - ds_f)) / (s_g - s_f)
+    dv_dP = dv_f + x * (dv_g - dv_f) + (v_g - v_f) * dx_dP
+    v = v_f + x * (v_g - v_f)
+    return np.sqrt(-v * v / dv_dP)
+
+
+@pytest.mark.parametrize('P_MPa, x', [(0.2, 0.05), (1.0, 0.01), (1.0, 0.5),
+                                      (1.0, 0.9), (5.0, 0.1), (10.0, 0.3),
+                                      (20.0, 0.5)])
+def test_hem_sound_speed_matches_saturation_line_derivative(P_MPa, x):
+    """The isentrope difference agrees with the saturation-line form."""
+    P_Pa = P_MPa * 1e6
+    h_f = CP.PropsSI('H', 'P', P_Pa, 'Q', 0, 'Water')
+    h_g = CP.PropsSI('H', 'P', P_Pa, 'Q', 1, 'Water')
+    c = _hem_sound_speed(P_MPa, h_f + x * (h_g - h_f))
+    assert c == pytest.approx(_saturation_line_hem_sound_speed(P_MPa, x),
+                              rel=1e-3)
+
+
+def test_hem_sound_speed_is_below_both_phase_sound_speeds():
+    """
+    Phase change makes the equilibrium mixture far softer than either
+    phase: at 1 MPa and x = 0.5, c_HEM is about 320 m/s against
+    about 1400 m/s for the saturated liquid and 500 m/s for the
+    saturated vapor.
+    """
+    P_Pa = 1e6
+    h_f = CP.PropsSI('H', 'P', P_Pa, 'Q', 0, 'Water')
+    h_g = CP.PropsSI('H', 'P', P_Pa, 'Q', 1, 'Water')
+    c = _hem_sound_speed(1.0, 0.5 * (h_f + h_g))
+    assert c < CP.PropsSI('A', 'P', P_Pa, 'Q', 1, 'Water')
+    assert c < CP.PropsSI('A', 'P', P_Pa, 'Q', 0, 'Water')
+
+
+def _flashing_march(mass_flow, diagnostics=None):
+    """
+    A liquid feed that flashes on the way up and self-flows to the
+    surface: 300 C compressed liquid at 10 MPa (T_sat = 311 C) at the
+    bottom of a 2000 m, 0.217 m well, which starts to boil about 200 m
+    above the feedzone, near 8.4 MPa.
+    """
+    wp = dict(DEFAULT_WELL_PARAMS)
+    wp['depth_m'] = 2000
+    h_fz = CP.PropsSI('H', 'T', 300 + 273.15, 'P', 10e6, 'Water')
+    rock = _linear_rock_temperatures(wp['depth_m'], 300, wp['delta_z_m'])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        profiles = wellbore_simulate(10.0, h_fz, mass_flow, rock, wp,
+                                     diagnostics=diagnostics)
+    return profiles, caught
+
+
+@pytest.fixture(scope='module')
+def supersonic_flashing_march():
+    """
+    At 102.5 kg/s the mixture reaches the wellhead at about 1.3 times
+    the HEM sound speed; 102 kg/s stays just below it (about 0.97).
+    """
+    diagnostics = {}
+    profiles, caught = _flashing_march(102.5, diagnostics)
+    return profiles, caught, diagnostics
+
+
+@pytest.mark.slow
+class TestTwoPhaseChokeDetection:
+    """
+    The EOS gives no sound speed for two-phase states, so a flashing
+    well never set the choked flag, however fast the mixture moved.
+    The march now compares the mixture velocity with the HEM sound
+    speed, reports reaching it and sets the choked flag, as a
+    single-phase choke does, without changing the march.
+    """
+
+    def test_flashing_well_self_flows_to_the_surface(
+            self, supersonic_flashing_march):
+        """The case is the one targeted: liquid feed, two-phase wellhead."""
+        profiles, _, _ = supersonic_flashing_march
+        P_prof, s_prof = profiles[1], profiles[4]
+        assert np.isnan(s_prof[0][1]), 'single-phase liquid feed'
+        assert P_prof[-1][0] == 0 and P_prof[-1][1] > 0, \
+            'reaches the surface with a positive WHP'
+        assert 0 < s_prof[-1][1] < 1, 'two-phase at the wellhead'
+
+    def test_reaching_the_hem_sound_speed_is_flagged(
+            self, supersonic_flashing_march):
+        """Flag, depth and Mach number in the diagnostics dict."""
+        _, _, diagnostics = supersonic_flashing_march
+        assert diagnostics['two_phase_choked'] is True
+        assert diagnostics['two_phase_mach_max'] >= 1.0
+        assert diagnostics['two_phase_choke_depth_m'] is not None
+
+    def test_reaching_the_hem_sound_speed_is_warned_once(
+            self, supersonic_flashing_march):
+        """One TwoPhaseChokeWarning, a RuntimeWarning subclass."""
+        _, caught, _ = supersonic_flashing_march
+        hem = [w for w in caught
+               if issubclass(w.category, TwoPhaseChokeWarning)]
+        assert len(hem) == 1
+        assert issubclass(TwoPhaseChokeWarning, RuntimeWarning)
+
+    def test_choked_flag_is_set(self, supersonic_flashing_march):
+        """
+        A two-phase choke sets the same choked flag as a single-phase
+        one, which the flow solvers and the client act on.
+        """
+        profiles, _, _ = supersonic_flashing_march
+        assert profiles[-1] is True
+
+    def test_detection_does_not_change_the_march(
+            self, supersonic_flashing_march):
+        """Same profiles with and without the diagnostics dict."""
+        profiles, _, _ = supersonic_flashing_march
+        plain, _ = _flashing_march(102.5)
+        for with_diag, without in zip(profiles[:6], plain[:6]):
+            np.testing.assert_array_equal(np.array(with_diag),
+                                          np.array(without))
+
+    def test_subsonic_flashing_well_is_not_flagged(self):
+        """At 90 kg/s the same well peaks near Mach 0.26."""
+        diagnostics = {}
+        profiles, caught = _flashing_march(90.0, diagnostics)
+        assert diagnostics['two_phase_choked'] is False
+        assert diagnostics['two_phase_choke_depth_m'] is None
+        assert 0 < diagnostics['two_phase_mach_max'] < 0.5
+        assert not any(issubclass(w.category, TwoPhaseChokeWarning)
+                       for w in caught)
+        assert profiles[-1] is False, 'not choked'
+
+    def test_single_phase_well_has_no_two_phase_mach(self):
+        """No two-phase step, nothing to compare: Mach is NaN."""
+        diagnostics = {}
+        wp = dict(DEFAULT_WELL_PARAMS)
+        h = CP.PropsSI('H', 'T', 530 + 273.15, 'P', 16.4e6, 'Water')
+        rock = _linear_rock_temperatures(wp['depth_m'], 530,
+                                         wp['delta_z_m'])
+        wellbore_simulate(16.4, h, 20.0, rock, wp, diagnostics=diagnostics)
+        assert diagnostics['two_phase_choked'] is False
+        assert np.isnan(diagnostics['two_phase_mach_max'])

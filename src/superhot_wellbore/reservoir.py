@@ -95,6 +95,8 @@ Additional public functions:
     Building blocks (used internally by coupled_model, also public):
 
     darcy_pressure_drop()          - Reservoir pressure drop (Eq. 2)
+    pseudo_pressure_bottomhole()   - Bottomhole pressure from the mass
+                                     pseudo-pressure (optional model)
     feedzone_state()               - Isenthalpic feedzone T and h
     bottomhole_pressure()          - Chains Darcy drop + feedzone state
 
@@ -115,7 +117,10 @@ boundary to the wellbore. Key assumptions:
        is an upstream weighting scheme: properties are evaluated
        at the far-field (drainage boundary) conditions rather than
        at the wellbore face. See "Fluid property evaluation" below
-       for discussion of this approximation.
+       for discussion of this approximation. Optionally
+       (reservoir_params 'inflow_properties'), rho/mu is instead
+       integrated along the isenthalpic or isothermal flow path as a
+       mass pseudo-pressure; see bottomhole_pressure().
 
     3. Isenthalpic near-well inflow: fluid flowing from the
        drainage boundary to the feedzone conserves specific
@@ -126,8 +131,9 @@ boundary to the wellbore. Key assumptions:
        at high pressure drawdowns (up to ~30 C cooling at dP ~ 30
        MPa for T_res ~ 500 C).
 
-    4. No near-wellbore effects: skin factor, non-Darcy flow,
-       and thermal drawdown are not modeled. The model therefore
+    4. No near-wellbore effects: non-Darcy flow and thermal
+       drawdown are not modeled, and the skin factor is zero unless
+       reservoir_params 'skin' sets one. The model therefore
        represents an idealized upper bound on well productivity.
 
 Transmissivity
@@ -277,8 +283,17 @@ References
       Engineering, 2nd edition. Academic Press.
     - Bell, I.H. et al. (2014). CoolProp. Ind. Eng. Chem. Res.
       53(6), 2498-2508.
+    - Al-Hussainy, R., Ramey, H.J. Jr., Crawford, P.B. (1966). The
+      flow of real gases through porous media. J. Petrol. Technol.
+      18(5), 624-636. [Pseudo-pressure]
+    - van Everdingen, A.F. (1953). The skin effect and its influence
+      on the productive capacity of a well. Trans. AIME 198, 171-176.
+    - Prats, M. (1961). Effect of vertical fractures on reservoir
+      behavior -- incompressible fluid case. SPE Journal 1(2),
+      105-118.
 """
 
+import functools
 import warnings
 
 import numpy as np
@@ -287,6 +302,7 @@ import CoolProp.CoolProp as CP
 from .wellbore_physics import (
     wellbore_simulate,
     fluid_properties_Ph,
+    fluid_properties_TP,
     DEFAULT_WELL_PARAMS,
 )
 
@@ -297,6 +313,24 @@ from .wellbore_physics import (
 
 GRAVITY = 9.80665         # m/s2
 MD_TO_M2 = 9.869233e-16  # 1 millidarcy in m2
+
+# Fluid-property models of the radial inflow (reservoir_params
+# 'inflow_properties'; see bottomhole_pressure()):
+#   'upstream'                    properties at the far-field pressure
+#                                 and the feedzone temperature (the
+#                                 model of Scott, 2026; the default)
+#   'pseudo_pressure'             mass pseudo-pressure along the
+#                                 isenthalpic path from the far field
+#   'pseudo_pressure_isothermal'  mass pseudo-pressure along the
+#                                 isothermal path (reservoir temperature)
+INFLOW_PROPERTY_MODELS = ('upstream', 'pseudo_pressure',
+                          'pseudo_pressure_isothermal')
+
+# Pressure grid of the mass pseudo-pressure table: from
+# _PSEUDO_PRESSURE_MIN_MPA to the far-field pressure, in steps of at
+# most _PSEUDO_PRESSURE_STEP_MPA (trapezoidal rule).
+_PSEUDO_PRESSURE_MIN_MPA = 0.1
+_PSEUDO_PRESSURE_STEP_MPA = 0.05
 
 
 # ===================================================================
@@ -315,6 +349,10 @@ MD_TO_M2 = 9.869233e-16  # 1 millidarcy in m2
 DEFAULT_RESERVOIR_PARAMS = {
     'drainage_radius_m': 500.0,
     'transmissivity_md_m': 1000.0,
+    # Skin factor S [-], added to ln(r_e/r_w); see _inflow_log_term()
+    'skin': 0.0,
+    # One of INFLOW_PROPERTY_MODELS; see bottomhole_pressure()
+    'inflow_properties': 'upstream',
 }
 
 
@@ -412,6 +450,44 @@ def _get_wellbore_radius(well_params):
     if well_params is not None and 'diameter_m' in well_params:
         return well_params['diameter_m'] / 2.0
     return DEFAULT_WELL_PARAMS['diameter_m'] / 2.0
+
+
+def _inflow_log_term(reservoir_params, well_params):
+    """
+    ln(r_e / r_w) + S of the radial inflow equation [-].
+
+    S is the skin factor (reservoir_params 'skin', default 0): the
+    dimensionless extra pressure drop of a damaged (S > 0) or
+    stimulated (S < 0) zone around the well (van Everdingen, 1953). It
+    also carries a simple well geometry: a vertical fracture of
+    half-length x_f with infinite conductivity behaves as a wellbore
+    of radius x_f / 2 (Prats, 1961), i.e. S = ln(2 r_w / x_f).
+
+    Parameters
+    ----------
+    reservoir_params : dict
+        Merged reservoir parameters (drainage_radius_m, skin).
+    well_params : dict or None
+        Well parameters; r_w = diameter_m / 2.
+
+    Returns
+    -------
+    float
+
+    Raises
+    ------
+    ValueError
+        If ln(r_e / r_w) + S is not positive, i.e. the skin would make
+        the inflow resistance vanish or negative.
+    """
+    r_w = _get_wellbore_radius(well_params)
+    term = (np.log(reservoir_params['drainage_radius_m'] / r_w)
+            + float(reservoir_params.get('skin', 0.0)))
+    if not term > 0:
+        raise ValueError(
+            f"ln(r_e/r_w) + skin must be positive, got {term:.3f} "
+            f"(skin {reservoir_params.get('skin', 0.0)})")
+    return term
 
 
 def _get_well_depths(well_params):
@@ -513,9 +589,6 @@ def darcy_pressure_drop(mass_flow_rate, P_reservoir_MPa, T_reservoir_C,
     params = _merge_reservoir_params(reservoir_params)
     transmissivity_md_m = _resolve_transmissivity(params)
 
-    r_w = _get_wellbore_radius(well_params)
-    r_e = params['drainage_radius_m']
-
     # Fluid properties at reservoir conditions.
     # At superhot reservoir conditions (T >> T_crit, single-phase),
     # CoolProp's T-P solver is unambiguous. We call it directly
@@ -528,11 +601,127 @@ def darcy_pressure_drop(mass_flow_rate, P_reservoir_MPa, T_reservoir_C,
     # Transmissivity: md*m -> m2*m = m3
     kb_m3 = transmissivity_md_m * MD_TO_M2
 
-    # dP = mu * mdot * ln(r_e/r_w) / (2*pi * rho * k*b)
-    ln_ratio = np.log(r_e / r_w)
+    # dP = mu * mdot * (ln(r_e/r_w) + S) / (2*pi * rho * k*b)
+    ln_ratio = _inflow_log_term(params, well_params)
     dP_Pa = (mu * mass_flow_rate * ln_ratio) / (2.0 * np.pi * rho * kb_m3)
 
     return dP_Pa / 1e6  # Pa -> MPa
+
+
+# Mass pseudo-pressure. With properties varying along the flow path,
+# the radial Darcy equation integrates to
+#
+#     mdot * (ln(r_e/r_w) + S) = 2 * pi * k*b * [m(P_res) - m(P_bh)]
+#
+#     m(P) = integral of rho/mu dP'                  [kg/(m3 s)]
+#
+# the mass form of the real-gas pseudo-pressure of gas-well analysis
+# (Al-Hussainy et al., 1966). It reduces to darcy_pressure_drop() when
+# rho/mu is constant. rho/mu is evaluated along the thermodynamic path
+# of the fluid from the far field to the well: isenthalpic (no heat
+# exchange with the rock; the path the feedzone state already assumes)
+# or isothermal (the rock holds the fluid at the reservoir temperature).
+# The two bound the deliverability for a fluid whose properties vary
+# strongly with pressure.
+
+def _rho_over_mu_along_path(P_MPa, P_reservoir_MPa, T_reservoir_C, path):
+    """
+    rho / mu [s/m2] at the pressures P_MPa (array) along the reservoir
+    flow path from the far-field state (P_reservoir_MPa,
+    T_reservoir_C): constant specific enthalpy ('isenthalpic') or
+    constant temperature ('isothermal').
+    """
+    T_K = T_reservoir_C + 273.15
+    h_res = CP.PropsSI('H', 'T', T_K, 'P', P_reservoir_MPa * 1e6, 'Water')
+    out = np.empty(len(P_MPa))
+    previous = None
+    for i, P in enumerate(P_MPa):
+        if path == 'isenthalpic':
+            props = fluid_properties_Ph(float(P), h_res, previous)
+            previous = props
+            out[i] = props['density_kgm3'] / props['viscosity_Pas']
+        else:
+            rho, mu, _, _ = fluid_properties_TP(T_K, float(P), h_res)
+            out[i] = rho / mu
+    return out
+
+
+@functools.lru_cache(maxsize=32)
+def _mass_pseudo_pressure_table(P_reservoir_MPa, T_reservoir_C, path):
+    """
+    Mass pseudo-pressure m(P) [kg/(m3 s)] relative to
+    _PSEUDO_PRESSURE_MIN_MPA, on a pressure grid up to the far-field
+    pressure (trapezoidal rule, steps of at most
+    _PSEUDO_PRESSURE_STEP_MPA). Cached per reservoir state and path.
+
+    Returns
+    -------
+    (ndarray, ndarray, ndarray)
+        Pressure grid [MPa], rho/mu [s/m2] and m at each grid
+        pressure; P and m increasing; read-only. Between grid points m
+        is the quadratic that the trapezoidal rule integrates, exact
+        for rho/mu linear in P.
+    """
+    if P_reservoir_MPa <= _PSEUDO_PRESSURE_MIN_MPA:
+        raise ValueError(
+            f'Reservoir pressure {P_reservoir_MPa} MPa is below the '
+            f'pseudo-pressure table floor of {_PSEUDO_PRESSURE_MIN_MPA} MPa')
+    n = max(201, int(np.ceil((P_reservoir_MPa - _PSEUDO_PRESSURE_MIN_MPA)
+                             / _PSEUDO_PRESSURE_STEP_MPA)) + 1)
+    P = np.linspace(_PSEUDO_PRESSURE_MIN_MPA, P_reservoir_MPa, n)
+    g = _rho_over_mu_along_path(P, P_reservoir_MPa, T_reservoir_C, path)
+    m = np.concatenate(([0.0],
+                        np.cumsum(0.5 * (g[1:] + g[:-1]) * np.diff(P) * 1e6)))
+    for array in (P, g, m):
+        array.setflags(write=False)
+    return P, g, m
+
+
+def pseudo_pressure_bottomhole(mass_flow_rate, P_reservoir_MPa, T_reservoir_C,
+                               reservoir_params=None, well_params=None,
+                               path='isenthalpic'):
+    """
+    Bottomhole flowing pressure from the mass pseudo-pressure form of
+    steady radial Darcy flow (see the comment above).
+
+    Parameters
+    ----------
+    mass_flow_rate : float
+        Mass flow rate [kg/s].
+    P_reservoir_MPa, T_reservoir_C : float
+        Far-field reservoir state [MPa, C].
+    reservoir_params : dict or None
+        Transmissivity, drainage radius and skin.
+    well_params : dict or None
+        Well parameters; r_w = diameter_m / 2.
+    path : str
+        'isenthalpic' or 'isothermal'.
+
+    Returns
+    -------
+    float
+        P_bh [MPa], or 0.0 if the reservoir cannot deliver the flow
+        rate above _PSEUDO_PRESSURE_MIN_MPA.
+    """
+    if path not in ('isenthalpic', 'isothermal'):
+        raise ValueError(f'Unknown pseudo-pressure path {path!r}')
+    params = _merge_reservoir_params(reservoir_params)
+    kb_m3 = _resolve_transmissivity(params) * MD_TO_M2
+    drop = (mass_flow_rate * _inflow_log_term(params, well_params)
+            / (2.0 * np.pi * kb_m3))
+    P, g, m = _mass_pseudo_pressure_table(float(P_reservoir_MPa),
+                                          float(T_reservoir_C), path)
+    target = m[-1] - drop
+    if target < 0.0:
+        return 0.0
+    # Invert the quadratic m(P) of the grid interval holding the target:
+    # m_i + g_i x + (g_i+1 - g_i) / (2 dP) x^2 = target, x = P - P_i [Pa]
+    i = int(np.clip(np.searchsorted(m, target) - 1, 0, len(P) - 2))
+    dP_Pa = (P[i + 1] - P[i]) * 1e6
+    a = (g[i + 1] - g[i]) / (2.0 * dP_Pa)
+    rest = target - m[i]
+    x = 2.0 * rest / (g[i] + np.sqrt(max(g[i]**2 + 4.0 * a * rest, 0.0)))
+    return float(P[i] + x / 1e6)
 
 
 # ===================================================================
@@ -639,6 +828,24 @@ def bottomhole_pressure(mass_flow_rate, P_reservoir_MPa, T_reservoir_C,
         4. Update T_current = T_feedzone
         5. Repeat until |T_new - T_old| < 1 C (typically 2-3 iters)
 
+    Inflow property models
+    ----------------------
+    reservoir_params['inflow_properties'] selects how rho and mu enter
+    the radial inflow (INFLOW_PROPERTY_MODELS):
+
+        'upstream'                    the scheme above (default)
+        'pseudo_pressure'             mass pseudo-pressure, rho/mu
+                                      integrated along the isenthalpic
+                                      path from the far field
+        'pseudo_pressure_isothermal'  the same along the isothermal path
+
+    The pseudo-pressure models need no iteration and are exact for
+    steady radial flow along their path (pseudo_pressure_bottomhole);
+    the isenthalpic and isothermal paths bound the deliverability.
+    In every model the fluid enters the well isenthalpically:
+    h_feedzone = h_res. reservoir_params['skin'] adds a skin factor
+    to ln(r_e/r_w) in every model (_inflow_log_term).
+
     Parameters
     ----------
     mass_flow_rate : float
@@ -666,6 +873,27 @@ def bottomhole_pressure(mass_flow_rate, P_reservoir_MPa, T_reservoir_C,
     T_res_K = T_reservoir_C + 273.15
     P_res_Pa = P_reservoir_MPa * 1e6
     h_res = CP.PropsSI('H', 'T', T_res_K, 'P', P_res_Pa, 'Water')
+
+    model = _merge_reservoir_params(reservoir_params)['inflow_properties']
+    if model not in INFLOW_PROPERTY_MODELS:
+        raise ValueError(
+            f"Unknown inflow_properties {model!r}. Valid models: "
+            f"{', '.join(INFLOW_PROPERTY_MODELS)}")
+    if model != 'upstream':
+        path = ('isothermal' if model == 'pseudo_pressure_isothermal'
+                else 'isenthalpic')
+        P_bh = pseudo_pressure_bottomhole(
+            mass_flow_rate, P_reservoir_MPa, T_reservoir_C,
+            reservoir_params, well_params, path)
+        T_fz_C = np.nan
+        if P_bh > 0.0:
+            T_fz_C = fluid_properties_Ph(P_bh, h_res)['temperature_K'] - 273.15
+        return {
+            'P_bh_MPa': P_bh,
+            'h_feedzone_Jkg': h_res,
+            'T_feedzone_C': T_fz_C,
+            'dP_reservoir_MPa': P_reservoir_MPa - P_bh,
+        }
 
     T_current_C = T_reservoir_C
     P_bh = T_fz_C = dP = None
@@ -779,14 +1007,12 @@ def coupled_model(mass_flow_rate, P_reservoir_MPa, T_reservoir_C,
         # Check that the simulation actually reached the surface.
         # If it terminated early (e.g., negative pressure at depth),
         # the profiles are truncated and the last point is NOT the
-        # wellhead. The solver must treat this as a failure.
+        # wellhead. The solver must treat this as a failure. A march
+        # that reaches the wellhead ends at depth 0, so any other
+        # last depth, however shallow, is an early termination.
         last_depth = profiles[0][-1][0]  # depth of last profile point
-        wp = dict(DEFAULT_WELL_PARAMS)
-        if well_params is not None:
-            wp.update(well_params)
-        delta_z = wp.get('delta_z_m', 10)
 
-        if last_depth > delta_z * 2:
+        if last_depth != 0:
             # Simulation terminated early -- did not reach surface
             fail['choked'] = choked
             return fail
@@ -977,16 +1203,23 @@ def evaluate_at_flow_rates(flow_rates_kg_s, P_reservoir_MPa, T_reservoir_C,
 def _max_flow_from_darcy(P_reservoir_MPa, T_reservoir_C,
                         reservoir_params, well_params):
     """
-    Physics-based upper bound on mass flow rate from the Darcy equation.
+    Estimate of the maximum mass flow rate from the Darcy equation.
 
     The maximum possible flow occurs when the entire reservoir pressure
     is consumed by drawdown (P_bh -> 0). Rearranging the Darcy equation:
 
         mdot_max = 2 * pi * rho * k*b * P_res / (mu * ln(r_e / r_w))
 
-    This is an overestimate (the wellbore model will fail long before
-    P_bh = 0), but it provides a physically meaningful upper bound
-    for the flow rate search range. A safety factor of 0.8 is applied.
+    with rho and mu at the far-field state, times a factor of 0.8.
+    This is not an upper bound: bottomhole_pressure() evaluates rho
+    and mu at the feedzone temperature, where fluid that cools on its
+    way to the well can have a much larger rho/mu (1.8 times the
+    far-field value in GEOPHIRES example SHR-4). solve_flow_for_whp()
+    uses the estimate to scale its steps and probes, and
+    _max_flow_bound() to limit its search.
+    The skin factor is included, and under a pseudo-pressure inflow
+    model the estimate is 0.8 times the flow rate that draws the
+    bottomhole pressure down to the floor of the pseudo-pressure table.
 
     Returns
     -------
@@ -994,22 +1227,95 @@ def _max_flow_from_darcy(P_reservoir_MPa, T_reservoir_C,
     """
     params = _merge_reservoir_params(reservoir_params)
     transmissivity_md_m = _resolve_transmissivity(params)
-    r_w = _get_wellbore_radius(well_params)
-    r_e = params['drainage_radius_m']
 
     T_K = T_reservoir_C + 273.15
     P_Pa = P_reservoir_MPa * 1e6
-    rho = CP.PropsSI('D', 'T', T_K, 'P', P_Pa, 'Water')
-    mu = CP.PropsSI('V', 'T', T_K, 'P', P_Pa, 'Water')
 
     kb_m3 = transmissivity_md_m * MD_TO_M2
-    ln_ratio = np.log(r_e / r_w)
+    ln_ratio = _inflow_log_term(params, well_params)
+
+    if params['inflow_properties'] in ('pseudo_pressure',
+                                       'pseudo_pressure_isothermal'):
+        # mdot when P_bh reaches the floor of the pseudo-pressure table
+        path = ('isothermal'
+                if params['inflow_properties'] == 'pseudo_pressure_isothermal'
+                else 'isenthalpic')
+        _, _, m = _mass_pseudo_pressure_table(float(P_reservoir_MPa),
+                                              float(T_reservoir_C), path)
+        mdot_max = 2.0 * np.pi * kb_m3 * m[-1] / ln_ratio
+        return 0.8 * mdot_max
+
+    rho = CP.PropsSI('D', 'T', T_K, 'P', P_Pa, 'Water')
+    mu = CP.PropsSI('V', 'T', T_K, 'P', P_Pa, 'Water')
 
     # mdot when dP = P_res (i.e., P_bh = 0)
     mdot_max = (2.0 * np.pi * rho * kb_m3 * P_Pa) / (mu * ln_ratio)
 
     # Apply safety factor; in practice BHP cannot go below ~1-2 MPa
     return 0.8 * mdot_max
+
+
+@functools.lru_cache(maxsize=32)
+def _upstream_rho_over_mu_max(P_reservoir_MPa, T_reservoir_C):
+    """
+    Largest rho/mu [s/m2] that the upstream inflow model can use.
+
+    bottomhole_pressure() evaluates rho and mu at the far-field pressure
+    and the feedzone temperature of its previous pass, a temperature of
+    the isenthalpic expansion of the far-field fluid. This is the
+    largest rho/mu at the far-field pressure over the range of those
+    temperatures, sampled densely; cached per reservoir state.
+    """
+    P_Pa = P_reservoir_MPa * 1e6
+    T_K = T_reservoir_C + 273.15
+    h_res = CP.PropsSI('H', 'T', T_K, 'P', P_Pa, 'Water')
+    temperatures_K = [T_K]
+    for P_MPa in np.linspace(_PSEUDO_PRESSURE_MIN_MPA, P_reservoir_MPa, 64):
+        try:
+            temperatures_K.append(
+                CP.PropsSI('T', 'P', P_MPa * 1e6, 'H', h_res, 'Water'))
+        except ValueError:
+            continue
+    best = 0.0
+    for T in np.linspace(min(temperatures_K), max(temperatures_K), 400):
+        try:
+            rho = CP.PropsSI('D', 'T', T, 'P', P_Pa, 'Water')
+            mu = CP.PropsSI('V', 'T', T, 'P', P_Pa, 'Water')
+        except ValueError:
+            continue
+        best = max(best, rho / mu)
+    return best
+
+
+def _max_flow_bound(P_reservoir_MPa, T_reservoir_C, reservoir_params,
+                    well_params):
+    """
+    Upper bound on the mass flow rate the inflow model can deliver
+    [kg/s]: above it the bottomhole pressure would be below zero.
+
+    Upstream model: the whole far-field pressure as drawdown, with the
+    largest rho/mu the model can use (_upstream_rho_over_mu_max).
+    Pseudo-pressure models: the exact flow rate that draws the
+    bottomhole pressure down to the floor of the pseudo-pressure table.
+    solve_flow_for_whp() searches up to this bound, so that a target
+    wellhead pressure reached above _max_flow_from_darcy() is found
+    rather than reported as a capacity limit.
+    """
+    params = _merge_reservoir_params(reservoir_params)
+    kb_m3 = _resolve_transmissivity(params) * MD_TO_M2
+    ln_ratio = _inflow_log_term(params, well_params)
+    if params['inflow_properties'] in ('pseudo_pressure',
+                                       'pseudo_pressure_isothermal'):
+        path = ('isothermal'
+                if params['inflow_properties'] == 'pseudo_pressure_isothermal'
+                else 'isenthalpic')
+        _, _, m = _mass_pseudo_pressure_table(float(P_reservoir_MPa),
+                                              float(T_reservoir_C), path)
+        return 2.0 * np.pi * kb_m3 * m[-1] / ln_ratio
+    rho_over_mu = _upstream_rho_over_mu_max(float(P_reservoir_MPa),
+                                            float(T_reservoir_C))
+    return (2.0 * np.pi * kb_m3 * P_reservoir_MPa * 1e6 * rho_over_mu
+            / ln_ratio)
 
 
 def _bisect_to_convergence(eval_whp, f_lo, f_hi, whp_lo, whp_hi,
@@ -1214,6 +1520,10 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
     # -----------------------------------------------------------------
     flow_max_darcy = _max_flow_from_darcy(
         P_reservoir_MPa, T_reservoir_C, reservoir_params, well_params)
+    # The far-field estimate scales the steps and probes; the search
+    # runs up to an upper bound on what the inflow model delivers.
+    flow_search_max = max(flow_max_darcy, _max_flow_bound(
+        P_reservoir_MPa, T_reservoir_C, reservoir_params, well_params))
     flow_min = max(0.1, flow_max_darcy * 0.005)
     if min_flow_kg_s is not None:
         flow_min = max(flow_min, min_flow_kg_s)
@@ -1302,7 +1612,7 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
                 break
 
     trial = f_feasible
-    while trial < flow_max_darcy:
+    while trial < flow_search_max:
         # Adaptive step: 5 kg/s normally, 1 kg/s when WHP is
         # within 2 MPa of target
         whp_current = _whp(f_feasible)
@@ -1313,7 +1623,7 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
             step = base_step
 
         trial = f_feasible + step
-        if trial > flow_max_darcy:
+        if trial > flow_search_max:
             break
 
         if _feasible(trial):
@@ -1368,7 +1678,7 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
         # flows work fine. If we find a feasible point above, extend.
         for gap_mult in [1.2, 1.5, 2.0, 3.0]:
             gap_trial = f_infeasible * gap_mult
-            if gap_trial > flow_max_darcy:
+            if gap_trial > flow_search_max:
                 break
             if _feasible(gap_trial):
                 if verbose:
@@ -1379,7 +1689,7 @@ def solve_flow_for_whp(target_whp_MPa, P_reservoir_MPa, T_reservoir_C,
                 f_infeasible2 = None
                 for step_frac2 in [0.05, 0.1, 0.2, 0.4, 0.8]:
                     trial2 = f_feasible2 * (1 + step_frac2)
-                    if trial2 > flow_max_darcy:
+                    if trial2 > flow_search_max:
                         break
                     if _feasible(trial2):
                         f_feasible2 = trial2

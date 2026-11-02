@@ -24,8 +24,9 @@ Wellbore simulator:
 Equation of state (used by this module and by reservoir.py):
     fluid_properties_Ph(pressure_MPa, enthalpy_Jkg, prev_props)
         Primary thermodynamic lookup from (P, h). Routes to IAPWS97
-        near the critical point (|P - P_crit| < 0.1 MPa), CoolProp
-        elsewhere. For viscosity, IAPWS97 has a known gap near
+        near the critical point (P_crit - 0.5 < P < P_crit + 5 MPa,
+        i.e. 21.564-27.064 MPa), CoolProp elsewhere. For viscosity,
+        IAPWS97 has a known gap near
         rho_crit; when this occurs, CoolProp's IAPWS-95 viscosity
         is used instead. Returns T, rho, mu, sound speed, phase,
         and vapor quality.
@@ -146,6 +147,15 @@ The key approximations are:
        The choked flag is returned so that upstream solvers
        (e.g., solve_flow_for_whp) can find the maximum non-choked
        flow rate iteratively.
+       The equation of state gives no sound speed for two-phase
+       states, so for those the mixture velocity is compared with the
+       homogeneous-equilibrium sound speed instead (_hem_sound_speed),
+       the critical velocity of the homogeneous equilibrium model the
+       march itself uses. Reaching it sets the same choked flag, and
+       is also reported by a TwoPhaseChokeWarning and the optional
+       diagnostics dict. In either phase the flag is a report: there
+       is no critical-flow closure, and the prescribed flow rate is
+       marched unchanged.
 
 Future extensions
 -----------------
@@ -228,6 +238,10 @@ Bell, I.H., Wronski, J., Quoilin, S., Lemort, V. (2014). Pure
     and pseudo-pure fluid thermophysical property evaluation and the
     open-source thermophysical property library CoolProp. Ind. Eng.
     Chem. Res. 53(6), 2498-2508.
+Wallis, G.B. (1969). One-Dimensional Two-Phase Flow. McGraw-Hill,
+    New York.
+Brennen, C.E. (2005). Fundamentals of Multiphase Flow. Cambridge
+    University Press.
 Albertsson, A., Bjarnason, J.O., Gunnarsson, T. (2003). IDDP
     Feasibility Report Part 3: Fluid Handling and Evaluation.
     (Heat-loss coefficient derived from Carslaw and Jaeger, 1959.)
@@ -286,6 +300,25 @@ DEFAULT_WELL_PARAMS = {
     'heat_loss_factor': 2.5,     # Heat-loss coefficient U [W/m/K]
     'roughness_m': 0.046e-3,     # Pipe roughness [m], commercial steel
 }
+
+# Relative pressure step of the finite difference in _hem_sound_speed().
+# A first-order difference with this step agrees with a central
+# difference, and with the saturation-line form of the derivative,
+# to within about 0.01 m/s at states sampled over 0.2-20 MPa.
+_HEM_DP_REL = 1e-4
+
+
+class TwoPhaseChokeWarning(RuntimeWarning):
+    """
+    The two-phase mixture velocity reached the homogeneous-equilibrium
+    sound speed (see _hem_sound_speed).
+
+    Issued by wellbore_simulate(), at most once per march, which then
+    also sets its choked flag, as for a single-phase choke. It derives
+    from RuntimeWarning, so the solvers' RuntimeWarning filters
+    silence it during their scans, as they do the single-phase choke
+    warning.
+    """
 
 
 # ===================================================================
@@ -359,6 +392,61 @@ def _two_phase_properties(quality, rho_f, rho_g, mu_dyn_f, mu_dyn_g):
     return density, mu_dyn_bulk, alpha
 
 
+def _hem_sound_speed(pressure_MPa, enthalpy_Jkg):
+    """
+    Homogeneous-equilibrium (HEM) sound speed of a two-phase state.
+
+    fluid_properties_Ph() returns NaN sound speed for two-phase
+    states, so wellbore_simulate()'s single-phase choke check cannot
+    fire there. In the homogeneous equilibrium model the phases move
+    at one velocity (the assumption of the whole wellbore model) and
+    stay in thermodynamic equilibrium, so small disturbances travel at
+    the thermodynamic sound speed of the equilibrium mixture,
+
+        c_HEM^2 = (dP/drho)_s
+
+    where rho is the homogeneous density, 1/rho = x/rho_g +
+    (1-x)/rho_f (the mixture density of _two_phase_properties()), and
+    the derivative follows the isentrope through the state, along
+    which the quality changes as the mixture flashes or condenses
+    (Wallis, 1969; Brennen, 2005, Ch. 9). A homogeneous flow chokes
+    when its velocity reaches c_HEM. Because evaporation and
+    condensation enter the derivative, c_HEM is far below the sound
+    speed of either phase: about 22 m/s at 1 MPa and x = 0.01, 320 m/s
+    at x = 0.5 and 440 m/s at x = 0.9.
+
+    The derivative is a backward (lower-pressure) difference along the
+    CoolProp (IAPWS-95) isentrope, which returns the equilibrium
+    two-phase density. For water an isentrope followed to lower
+    pressure from inside the dome stays inside it (s_f falls and s_g
+    rises as the pressure drops), so the difference does not straddle
+    the saturation boundary, where the equilibrium sound speed jumps.
+
+    Parameters
+    ----------
+    pressure_MPa : float
+        Pressure [MPa], below the critical pressure.
+    enthalpy_Jkg : float
+        Specific enthalpy [J/kg], between h_f(P) and h_g(P).
+
+    Returns
+    -------
+    float
+        c_HEM [m/s], or NaN if the property lookups fail.
+    """
+    P_Pa = pressure_MPa * 1e6
+    P_lo_Pa = P_Pa * (1.0 - _HEM_DP_REL)
+    try:
+        entropy = CP.PropsSI('S', 'P', P_Pa, 'H', enthalpy_Jkg, 'Water')
+        rho = CP.PropsSI('D', 'P', P_Pa, 'S', entropy, 'Water')
+        rho_lo = CP.PropsSI('D', 'P', P_lo_Pa, 'S', entropy, 'Water')
+    except Exception:
+        return np.nan
+    if not rho > rho_lo:
+        return np.nan
+    return float(np.sqrt((P_Pa - P_lo_Pa) / (rho - rho_lo)))
+
+
 def fluid_properties_Ph(pressure_MPa, enthalpy_Jkg, prev_props=None):
     """
     Compute fluid properties from pressure and specific enthalpy.
@@ -370,7 +458,8 @@ def fluid_properties_Ph(pressure_MPa, enthalpy_Jkg, prev_props=None):
 
     The routing logic is:
         1. If P is within the near-critical/pseudocritical zone
-           (21.5 < P < 27 MPa), use IAPWS97 for T, rho, and sound
+           (P_crit - 0.5 < P < P_crit + 5.0, i.e. 21.564 < P <
+           27.064 MPa), use IAPWS97 for T, rho, and sound
            speed. IAPWS97 uses explicit backward equations T(P,h)
            and v(P,h) -- direct polynomial evaluations with no
            iteration. CoolProp (IAPWS-95) must iteratively invert
@@ -1029,7 +1118,8 @@ def enthalpy_gradient(temperature_K, T_rock_K, mass_flow_rate,
 # ===================================================================
 
 def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
-                      rock_temperatures, well_params=None):
+                      rock_temperatures, well_params=None, *,
+                      diagnostics=None):
     """
     Steady-state bottom-to-surface wellbore marching model.
 
@@ -1070,6 +1160,20 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
             delta_z_m       : float - Vertical step size [m] (default 10)
             heat_loss_factor: float - U [W/m/K] (default 2.5)
             roughness_m     : float - Pipe roughness [m] (default 0.046 mm)
+    diagnostics : dict or None
+        Keyword only. If a dict is given, the two-phase choke check
+        writes its findings into it (the return value is unchanged):
+            two_phase_choked        : bool  - True if the mixture
+                                      velocity reached the homogeneous-
+                                      equilibrium sound speed at a
+                                      two-phase step (also announced
+                                      by a TwoPhaseChokeWarning)
+            two_phase_choke_depth_m : depth of the first such step [m],
+                                      or None
+            two_phase_mach_max      : float - largest v / c_HEM over
+                                      the two-phase steps, NaN if none
+        A two-phase choke also sets the choked flag. The check does not
+        change the march.
 
     Returns
     -------
@@ -1080,7 +1184,16 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
          velocity_profile,      - [(depth, v_ms), ...]
          saturation_profile,    - [(depth, x), ...]
          rock_temp_profile,     - [(depth, T_rock_C), ...]
-         choked)                - bool: True if v > c_sound anywhere
+         choked)                - bool: True if the velocity reached
+                                   the local sound speed anywhere (the
+                                   EOS sound speed in single-phase
+                                   flow, the homogeneous-equilibrium
+                                   sound speed in two-phase flow)
+
+    Each entry holds the state at its own depth. The profiles start
+    at the feedzone, (depth_m, P_bottom_MPa, feedzone_enthalpy), and
+    end at the wellhead (depth 0) after depth_m / delta_z_m steps,
+    unless the march terminates early on a non-positive pressure.
 
     The choked flag indicates that the prescribed mass flow rate
     exceeds what the wellbore can sustain in steady-state flow.
@@ -1125,6 +1238,11 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
     # cross-section.
     choked = False
 
+    # Two-phase choke detection (diagnostic only; see diagnostics).
+    two_phase_choked = False
+    two_phase_choke_depth = None
+    two_phase_mach_max = np.nan
+
     # State for marching
     prev_props = {
         'phase': init['phase'],
@@ -1165,6 +1283,31 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
                     RuntimeWarning, stacklevel=2)
             choked = True
 
+        # --- Two-phase choke check ---
+        # sound_speed is NaN for two-phase states, so the check above
+        # never fires there. Compare the mixture velocity with the
+        # homogeneous-equilibrium sound speed instead and set `choked`
+        # as for a single-phase choke. Like that flag, this does not
+        # change the march.
+        if fluid['success'] and fluid['phase'] == 'two_phase':
+            c_hem = _hem_sound_speed(pressure, enthalpy)
+            if np.isfinite(c_hem):
+                mach = velocity / c_hem
+                two_phase_mach_max = np.nanmax([two_phase_mach_max, mach])
+                if mach >= 1.0 and not two_phase_choked:
+                    two_phase_choked = True
+                    two_phase_choke_depth = current_depth
+                    warnings.warn(
+                        f"Two-phase mixture velocity ({velocity:.1f} m/s) "
+                        f"reaches the homogeneous-equilibrium sound speed "
+                        f"({c_hem:.1f} m/s) at depth {current_depth} m: "
+                        f"the flow is critical (choked) under HEM. "
+                        f"The choked flag is set; the prescribed flow "
+                        f"rate is marched unchanged.",
+                        TwoPhaseChokeWarning, stacklevel=2)
+                if mach >= 1.0:
+                    choked = True
+
         # --- Property smoothing for numerical stability ---
         # Three cases:
         #   1. EOS failed (success=False): fluid_properties_Ph already
@@ -1174,7 +1317,7 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
         #      apply light smoothing (10% prev, 90% new) to damp
         #      step-to-step variations where thermodynamic properties
         #      change most rapidly. This is independent of the wider
-        #      IAPWS97 routing zone (21.5-27 MPa); IAPWS97's backward
+        #      IAPWS97 routing zone (21.564-27.064 MPa); IAPWS97's backward
         #      equations are smooth internally and don't need blending.
         #   3. Normal: use EOS output directly.
         in_smoothing_zone = abs(pressure - P_CRIT_MPA) < 0.5
@@ -1192,6 +1335,23 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
             temperature = fluid['temperature_K']
 
         saturation = fluid['saturation']
+        T_rock_K = rock_temperatures[current_depth] + 273.15
+
+        # --- Store profiles ---
+        # The state at current_depth, before it is stepped upward, so
+        # that T, v and x are stored with the P and h they were
+        # evaluated at.
+        temperature_profile.append((current_depth, temperature - 273.15))
+        rock_temp_profile.append((current_depth, T_rock_K - 273.15))
+        pressure_profile.append((current_depth, pressure))
+        enthalpy_profile.append((current_depth, enthalpy * 1e-6))
+        velocity_profile.append((current_depth, velocity))
+        saturation_profile.append((current_depth, saturation))
+
+        if current_depth == 0:
+            # Wellhead reached: the well is integrated over exactly
+            # well_depth, so there is no step above the surface.
+            break
 
         # --- Pressure step (Eq. 4) ---
         # pressure_gradient() returns the MAGNITUDE of the pressure drop
@@ -1225,8 +1385,6 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
         # enthalpy_gradient() returns the SIGNED derivative dh/dz, which
         # is normally negative (gravity, KE, and heat loss all reduce h
         # going up). We add dh/dz * dz directly.
-        T_rock_K = rock_temperatures[current_depth] + 273.15
-
         dh_dz = enthalpy_gradient(
             temperature, T_rock_K, mass_flow_rate,
             density, drho_dz, area,
@@ -1253,13 +1411,12 @@ def wellbore_simulate(P_bottom_MPa, feedzone_enthalpy, mass_flow_rate,
             'pressure_MPa': pressure,
         }
 
-        # --- Store profiles ---
-        temperature_profile.append((current_depth, temperature - 273.15))
-        rock_temp_profile.append((current_depth, T_rock_K - 273.15))
-        pressure_profile.append((current_depth, pressure))
-        enthalpy_profile.append((current_depth, enthalpy * 1e-6))
-        velocity_profile.append((current_depth, velocity))
-        saturation_profile.append((current_depth, saturation))
+    if diagnostics is not None:
+        diagnostics.update({
+            'two_phase_choked': two_phase_choked,
+            'two_phase_choke_depth_m': two_phase_choke_depth,
+            'two_phase_mach_max': float(two_phase_mach_max),
+        })
 
     return (temperature_profile, pressure_profile, enthalpy_profile,
             velocity_profile, saturation_profile, rock_temp_profile,
