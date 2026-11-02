@@ -1010,10 +1010,10 @@ def supersonic_flashing_march():
 class TestTwoPhaseChokeDetection:
     """
     The EOS gives no sound speed for two-phase states, so a flashing
-    well never sets the choked flag, however fast the mixture moves.
+    well never set the choked flag, however fast the mixture moved.
     The march now compares the mixture velocity with the HEM sound
-    speed and reports reaching it, without changing the march or the
-    choked flag that the solvers act on.
+    speed, reports reaching it and sets the choked flag, as a
+    single-phase choke does, without changing the march.
     """
 
     def test_flashing_well_self_flows_to_the_surface(
@@ -1043,13 +1043,13 @@ class TestTwoPhaseChokeDetection:
         assert len(hem) == 1
         assert issubclass(TwoPhaseChokeWarning, RuntimeWarning)
 
-    def test_choked_flag_is_unchanged(self, supersonic_flashing_march):
+    def test_choked_flag_is_set(self, supersonic_flashing_march):
         """
-        Detection only: the single-phase choked flag, which the flow
-        solvers and the client act on, is not set.
+        A two-phase choke sets the same choked flag as a single-phase
+        one, which the flow solvers and the client act on.
         """
         profiles, _, _ = supersonic_flashing_march
-        assert profiles[-1] is False
+        assert profiles[-1] is True
 
     def test_detection_does_not_change_the_march(
             self, supersonic_flashing_march):
@@ -1069,6 +1069,7 @@ class TestTwoPhaseChokeDetection:
         assert 0 < diagnostics['two_phase_mach_max'] < 0.5
         assert not any(issubclass(w.category, TwoPhaseChokeWarning)
                        for w in caught)
+        assert profiles[-1] is False, 'not choked'
 
     def test_single_phase_well_has_no_two_phase_mach(self):
         """No two-phase step, nothing to compare: Mach is NaN."""

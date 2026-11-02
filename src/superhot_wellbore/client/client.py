@@ -638,9 +638,15 @@ class CoupledWellboreClient:
                                     timesteps=timesteps,
                                     notes=notes)
         if profile.any_choked:
-            profile.notes.append(
-                'At least one timestep is choke limited, so the '
-                'reported wellhead pressure exceeds the target')
+            if operating.control == 'whp' and not hold_flow:
+                profile.notes.append(
+                    'At least one timestep is choke limited, so the '
+                    'reported wellhead pressure exceeds the target')
+            else:
+                profile.notes.append(
+                    'At least one timestep reached the local sound speed '
+                    'in the wellbore (choked flow), so its wellhead values '
+                    'above the choke point are approximate')
         if profile.any_pumped:
             pumped = [ts for ts in profile.timesteps
                       if ts.success and ts.pumped]
