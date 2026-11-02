@@ -466,6 +466,33 @@ class TestEdgeCases:
                                   'h_surface_MJkg': 3.0})
         assert not r['success']
 
+    @pytest.mark.parametrize('P_whp', [0.3, 0.5],
+                             ids=['0.3 MPa wellhead', '0.5 MPa wellhead'])
+    def test_binary_working_fluid_that_cannot_boil_fails(self, P_whp):
+        """
+        A wellhead 60 kJ/kg above saturation at 0.3 or 0.5 MPa (161 or
+        178 C) selects the binary cycle, but the 1 MPa working fluid,
+        heated to 5 K below it, cannot boil (T_sat = 180 C). The cycle
+        fails and says why instead of expanding liquid.
+        """
+        h_MJkg = _h_saturated_MJkg(P_whp, 1) + 0.060
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            r = power_cycle_analysis(_mock_cm(10.0, P_whp, h_MJkg))
+        assert r['cycle'] == 'binary' and not r['success'], r
+        assert np.isnan(r['power_MWe'])
+        assert any('Binary cycle infeasible' in str(w.message)
+                   for w in caught), [str(w.message) for w in caught]
+
+    def test_binary_working_fluid_that_boils_still_runs(self):
+        """At 0.7 MPa the same superheat (190 C) boils it: the cycle runs."""
+        h_MJkg = _h_saturated_MJkg(0.7, 1) + 0.060
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            r = power_cycle_analysis(_mock_cm(10.0, 0.7, h_MJkg))
+        assert r['cycle'] == 'binary' and r['success'], r
+        assert r['power_MWe'] > 0 and r['x_exit'] > 0.85
+
 
 # ====================================================================
 # 8. BAUMANN RULE: WET TURBINE EFFICIENCY

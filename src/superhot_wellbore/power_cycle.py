@@ -638,6 +638,10 @@ def _binary_cycle(m_gf, h_gf_in, T_gf_C, P_gf_MPa, pp):
 
         m_gf * (h_gf,in - h_gf,out) = m_wf * (h_wf,out - h_wf,in)
 
+    The cycle fails (no power, with a warning) when the geofluid is
+    too cold to evaporate the working fluid at P_wf, as the flash cycle
+    does below its separation pressure.
+
     Returns dict matching power_cycle_analysis() output format.
     """
     fail = {'power_MWe': np.nan, 'cycle': 'binary', 'x_exit': np.nan,
@@ -650,6 +654,24 @@ def _binary_cycle(m_gf, h_gf_in, T_gf_C, P_gf_MPa, pp):
     P_wf = pp['P_wf_MPa']
 
     try:
+        # The working fluid must leave the heat exchanger as vapor: the
+        # turbine model expands vapor. A geofluid too cold to evaporate
+        # it at P_wf (T_wf_out at or below T_sat(P_wf)) cannot run this
+        # cycle; the turbine would otherwise be fed liquid. With the
+        # defaults this happens for a slightly superheated wellhead
+        # below about 0.68 MPa.
+        T_sat_wf_K = CP.PropsSI('T', 'P', P_wf * 1e6, 'Q', 1, 'Water')
+        if T_wf_out_K <= T_sat_wf_K:
+            warnings.warn(
+                f"Binary cycle infeasible: the working fluid at "
+                f"{P_wf:.2f} MPa boils at {T_sat_wf_K - 273.15:.1f} C, "
+                f"but leaves the heat exchanger at "
+                f"{T_wf_out_K - 273.15:.1f} C (geofluid {T_gf_C:.1f} C "
+                f"less the {pp['delta_T_pinch_C']:g} K pinch), so it "
+                f"would reach the turbine as liquid.",
+                RuntimeWarning, stacklevel=3)
+            return fail
+
         # Geofluid outlet enthalpy at rejection temperature
         h_gf_out = CP.PropsSI('H', 'T', T_reject_K,
                               'P', P_gf_MPa * 1e6, 'Water')
