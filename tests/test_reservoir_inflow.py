@@ -11,7 +11,9 @@ and R3 of the GEOPHIRES documentation of the coupled wellbore model:
   vertical fracture (Prats, 1961);
 - the mass pseudo-pressure models, which integrate rho/mu along the
   isenthalpic or isothermal path from the far field instead of
-  evaluating it at one state (Al-Hussainy et al., 1966).
+  evaluating it at one state (Al-Hussainy et al., 1966);
+- the flow-rate search of solve_flow_for_whp(), which must reach the
+  capacity of every model.
 
 The reference results do not come from the code under test: the
 closed form of an ideal gas, the small-drawdown limit, the ordering of
@@ -39,7 +41,9 @@ from superhot_wellbore.reservoir import (INFLOW_PROPERTY_MODELS, MD_TO_M2,
                                          bottomhole_pressure,
                                          coupled_model, darcy_pressure_drop,
                                          pseudo_pressure_bottomhole,
-                                         rock_temperature_boiling)
+                                         rock_temperature_boiling,
+                                         rock_temperature_linear,
+                                         solve_flow_for_whp)
 
 WELL = {'depth_m': 2100, 'diameter_m': 0.217}
 IDDP_1 = {'drainage_radius_m': 500.0, 'transmissivity_md_m': 5318.0}
@@ -224,7 +228,76 @@ def test_coupled_model_runs_on_the_pseudo_pressure_inflow():
 
 
 # ====================================================================
-# 3. CLIENT CONFIGURATION
+# 3. FLOW-RATE SEARCH
+# ====================================================================
+#
+# solve_flow_for_whp() steps up from a low flow rate. Its steps scale
+# with _max_flow_from_darcy(), an estimate at the far-field state; the
+# search runs up to _max_flow_bound(). The well and reservoir are those
+# of GEOPHIRES example SHR-4: 30 MPa and 450 C, 997.5 md*m, 3500 m.
+
+SHR_4_WELL = {'depth_m': 3500, 'diameter_m': 0.216789, 'delta_z_m': 10,
+              'roughness_m': 4.6e-5, 'heat_loss_factor': 2.5}
+SHR_4 = {'drainage_radius_m': 500.16, 'transmissivity_md_m': 997.5}
+
+
+def _inflow_capacity(params):
+    """
+    Largest flow rate [kg/s] whose bottomhole pressure stays at or
+    above the 0.5 MPa floor of coupled_model().
+    """
+    lo, hi = 0.1, 1000.0
+    for _ in range(50):
+        mid = 0.5 * (lo + hi)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            try:
+                feasible = bottomhole_pressure(
+                    mid, 30.0, 450.0, params, SHR_4_WELL)['P_bh_MPa'] >= 0.5
+            except RuntimeError:   # equation of state below zero pressure
+                feasible = False
+        lo, hi = (mid, hi) if feasible else (lo, mid)
+    return lo
+
+
+@pytest.mark.parametrize('extra', [
+    {},
+    {'skin': 5.0},
+    {'inflow_properties': 'pseudo_pressure'},
+    {'inflow_properties': 'pseudo_pressure_isothermal'},
+])
+def test_flow_search_reaches_the_inflow_capacity(extra):
+    """
+    The far-field estimate stops short of what the inflow model
+    delivers (by its factor of 0.8 at least); the search bound does
+    not.
+    """
+    params = dict(SHR_4, **extra)
+    capacity = _inflow_capacity(params)
+    assert (reservoir._max_flow_from_darcy(30.0, 450.0, params, SHR_4_WELL)
+            < capacity
+            <= reservoir._max_flow_bound(30.0, 450.0, params, SHR_4_WELL))
+
+
+@pytest.mark.slow
+def test_target_whp_above_the_far_field_estimate_is_found():
+    """
+    With a skin of 5, the SHR-4 well delivers 10 MPa at its wellhead at
+    about 55 kg/s, above the far-field estimate of 52.7 kg/s. The
+    search used to stop at that estimate and return its 11.2 MPa as a
+    capacity limit, not converged.
+    """
+    params = dict(SHR_4, skin=5.0)
+    rock = rock_temperature_linear(SHR_4_WELL, 450.0)
+    result = solve_flow_for_whp(10.0, 30.0, 450.0, rock, params, SHR_4_WELL)
+    assert result['converged']
+    assert result['whp_MPa'] == pytest.approx(10.0, abs=0.15)
+    assert result['mass_flow_kgs'] > reservoir._max_flow_from_darcy(
+        30.0, 450.0, params, SHR_4_WELL)
+
+
+# ====================================================================
+# 4. CLIENT CONFIGURATION
 # ====================================================================
 
 def test_client_models_match_the_core():
